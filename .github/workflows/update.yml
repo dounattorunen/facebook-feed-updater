@@ -1,0 +1,34 @@
+name: Update Facebook Feed
+
+on:
+  schedule:
+    # 毎日 日本時間の午前6時 (UTCで前日21:00) に自動実行
+    - cron: '0 21 * * *'
+  workflow_dispatch: # 管理画面から手動で実行するためのボタン
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Run script
+        run: python update_feed.py
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add facebook_feed.csv
+          # 変更がある場合のみコミットしてプッシュ
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update feed: $(date +'%Y-%m-%d %H:%M:%S')"
+          git push
