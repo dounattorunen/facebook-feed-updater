@@ -40,17 +40,6 @@ jobs:
           git push
 
       # ④ 【新規追加】XMLをfutureshopのFTPへ転送
-      - name: FTP-Deploy-Action
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.4
-        with:
-          server: ${{ secrets.FTP_SERVER }}
-          username: ${{ secrets.FTP_USERNAME }}
-          password: ${{ secrets.FTP_PASSWORD }}
-          local-dir: ./
-          server-dir: /public_html/pinterest/
-          exclude: |
-            **/*
-            !pinterest_feed.xml
-          # ▼ここから下を追加
-          protocol: ftps 
-          port: 21 # futureshopの指定が990の場合は 990 に変更してください
+      - name: Upload XML via cURL
+        run: |
+          curl -T pinterest_feed.xml ftp://${{ secrets.FTP_SERVER }}/public_html/pinterest/pinterest_feed.xml --user "${{ secrets.FTP_USERNAME }}:${{ secrets.FTP_PASSWORD }}"
