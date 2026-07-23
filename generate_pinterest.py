@@ -21,6 +21,13 @@ def main():
         with open(input_file, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
+                # ★ 追加: 在庫状況を取得し、小文字にして判定しやすくする
+                availability = row.get("availability", "").strip().lower()
+                
+                # ★ 追加: 在庫切れ（out of stock）の場合はスキップして次の商品へ
+                if availability == "out of stock" or availability == "在庫切れ":
+                    continue
+                
                 title = html.escape(row.get("title", ""))
                 link = html.escape(row.get("link", ""))
                 desc = html.escape(row.get("description", ""))
@@ -43,7 +50,7 @@ def main():
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(rss)
         
-    print(f"Pinterest用フィードを {output_file} に生成しました。")
+    print(f"Pinterest用フィードを {output_file} に生成しました（在庫切れを除外済）。")
 
 if __name__ == "__main__":
     main()
