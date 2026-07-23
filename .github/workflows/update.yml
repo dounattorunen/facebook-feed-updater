@@ -51,3 +51,6 @@ jobs:
           exclude: |
             **/*
             !pinterest_feed.xml
+          # ▼ここから下を追加
+          protocol: ftps 
+          port: 21 # futureshopの指定が990の場合は 990 に変更してください
