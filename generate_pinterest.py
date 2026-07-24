@@ -10,8 +10,8 @@ def main():
     # RSSヘッダー（※ショップ名とURLは自社のものに変更してください）
     rss = '<?xml version="1.0" encoding="UTF-8"?>\n'
     rss += '<rss version="2.0">\n<channel>\n'
-    rss += '  <title>あなたのショップ名</title>\n'
-    rss += '  <link>https://www.your-shop-domain.com</link>\n'
+    rss += '  <title>クロールバリエ公式店</title>\n'
+    rss += '  <link>https://www.bath-ec.com</link>\n'
     rss += '  <description>Pinterest用商品フィード</description>\n'
     
     pub_date = formatdate(time.time(), localtime=False)
