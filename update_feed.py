@@ -12,7 +12,7 @@ COMMENT_TAG_PATTERN = re.compile(r"<[^<>]*>")
 # 半角スペース・全角スペースが2つ以上連続している箇所をまとめる
 MULTI_SPACE_PATTERN = re.compile(r"[ \u3000]{2,}")
 
-def clean_description(text):
+def clean_text(text):
     if not text:
         return text
     # 山括弧タグを除去
@@ -48,9 +48,10 @@ def check_image_exists(image_url):
 def process_row(row, timestamp):
     item_id = row.get("id", "")
 
-    # 【0】説明文のクリーニング（タグ除去・実体参照デコード・空白圧縮）
-    if "description" in row:
-        row["description"] = clean_description(row["description"])
+    # 【0】説明文・タイトルのクリーニング（タグ除去・実体参照デコード・空白圧縮）
+    for field in ("description", "title"):
+        if field in row:
+            row[field] = clean_text(row[field])
 
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
