@@ -5,12 +5,12 @@ import urllib.request
 from urllib.error import HTTPError, URLError
 import time
 import ssl
-import concurrent.futures # ★追加：並列処理用のモジュール
+import concurrent.futures
 
 # 商品説明文に残っている <クラリーノ> のような山括弧タグ（注釈タグ）を除去する
 COMMENT_TAG_PATTERN = re.compile(r"<[^<>]*>")
 # 半角スペース・全角スペースが2つ以上連続している箇所をまとめる
-MULTI_SPACE_PATTERN = re.compile(r"[ \u3000]{2,}")
+MULTI_SPACE_PATTERN = re.compile(r"[ 　]{2,}")
 
 def clean_text(text):
     if not text:
@@ -33,6 +33,8 @@ def clean_text(text):
 # futureshopのフィードURL
 url = "https://ifeed.future-shop.net/sn/bath_d397e513c0bb34b415af1207cab70e4e58b03b2dbee4cdec30280e14be472338.csv"
 output_file = "facebook_feed.csv"
+chatgpt_output_file = "chatgpt_feed.csv" # ★追加：ChatGPT用の出力ファイル名
+STORE_NAME = "BATH ONLINE SHOP"          # ★追加：ChatGPTで必須となる店舗名(適宜変更してください)
 # ----------
 
 # Macローカルでのテスト用（SSL証明書エラー回避）
@@ -103,13 +105,59 @@ def main():
         # map関数を使うことで、元のCSVの順番を保ったまま一気に処理できます
         processed_rows = list(executor.map(lambda r: process_row(r, timestamp), rows))
         
-    # 結果をCSVに書き込み
+    # ==========================================
+    # Facebook用フィードの保存 (元の処理そのまま)
+    # ==========================================
     with open(output_file, "w", encoding="utf-8", newline="") as outfile:
         writer = csv.DictWriter(outfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(processed_rows)
         
-    print("完了しました！facebook_feed.csv を確認してください。")
+    print(f"Facebook用フィードを出力しました: {output_file}")
+    
+    # ==========================================
+    # ChatGPT用フィードの保存 (新規追加)
+    # ==========================================
+    # 1. カラム名の変換・追加
+    chatgpt_fieldnames = []
+    for f in fieldnames:
+        if f == "id": chatgpt_fieldnames.append("item_id")
+        elif f == "link": chatgpt_fieldnames.append("url")
+        elif f == "image_link": chatgpt_fieldnames.append("image_url")
+        else: chatgpt_fieldnames.append(f)
+        
+    if "seller_name" not in chatgpt_fieldnames:
+        chatgpt_fieldnames.append("seller_name")
+        
+    # 2. データの中身の変換
+    chatgpt_rows = []
+    for row in processed_rows:
+        new_row = {}
+        for k, v in row.items():
+            if k == "id": 
+                new_row["item_id"] = v
+            elif k == "link": 
+                new_row["url"] = v
+            elif k == "image_link": 
+                new_row["image_url"] = v
+            elif k == "availability":
+                # OpenAIの仕様に合わせてアンダースコアに置換 (in stock -> in_stock)
+                new_row["availability"] = str(v).replace(" ", "_")
+            else:
+                new_row[k] = v
+                
+        # 必須項目の店舗名を追加
+        new_row["seller_name"] = STORE_NAME
+        chatgpt_rows.append(new_row)
+        
+    # 3. CSVファイルとして保存
+    with open(chatgpt_output_file, "w", encoding="utf-8", newline="") as outfile_chatgpt:
+        writer_chatgpt = csv.DictWriter(outfile_chatgpt, fieldnames=chatgpt_fieldnames)
+        writer_chatgpt.writeheader()
+        writer_chatgpt.writerows(chatgpt_rows)
+        
+    print(f"ChatGPT用フィードを出力しました: {chatgpt_output_file}")
+    print("全処理が完了しました！")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
