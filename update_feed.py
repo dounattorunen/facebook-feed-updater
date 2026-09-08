@@ -1,9 +1,29 @@
 import csv
+import html
+import re
 import urllib.request
 from urllib.error import HTTPError, URLError
 import time
 import ssl
 import concurrent.futures # ★追加：並列処理用のモジュール
+
+# 商品説明文に残っている <クラリーノ> のような山括弧タグ（注釈タグ）を除去する
+COMMENT_TAG_PATTERN = re.compile(r"<[^<>]*>")
+# 半角スペース・全角スペースが2つ以上連続している箇所をまとめる
+MULTI_SPACE_PATTERN = re.compile(r"[ \u3000]{2,}")
+
+def clean_description(text):
+    if not text:
+        return text
+    # 山括弧タグを除去
+    text = COMMENT_TAG_PATTERN.sub("", text)
+    # &nbsp; や &#10003; などのHTML実体参照を実際の文字に変換
+    text = html.unescape(text)
+    # デコードで生まれる非改行スペース(\xa0)を通常の半角スペースに統一
+    text = text.replace("\xa0", " ")
+    # 連続する空白（全角含む）を1つの半角スペースにまとめる
+    text = MULTI_SPACE_PATTERN.sub(" ", text)
+    return text.strip()
 
 # --- 設定 ---
 # futureshopのフィードURL
@@ -27,7 +47,11 @@ def check_image_exists(image_url):
 # 1行（1商品）分の処理をまとめた関数
 def process_row(row, timestamp):
     item_id = row.get("id", "")
-    
+
+    # 【0】説明文のクリーニング（タグ除去・実体参照デコード・空白圧縮）
+    if "description" in row:
+        row["description"] = clean_description(row["description"])
+
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
     if original_url:
