@@ -15,8 +15,12 @@ MULTI_SPACE_PATTERN = re.compile(r"[ \u3000]{2,}")
 def clean_text(text):
     if not text:
         return text
-    # 山括弧タグを除去
+    # 対応する < が無い壊れたコメント断片（-->  や <!-- 単体）を除去
+    text = text.replace("<!--", "").replace("-->", "")
+    # ペアになっている山括弧タグ（例：<クラリーノ>）を除去
     text = COMMENT_TAG_PATTERN.sub("", text)
+    # 上記で拾いきれない孤立した < や > も念のため除去
+    text = text.replace("<", "").replace(">", "")
     # &nbsp; や &#10003; などのHTML実体参照を実際の文字に変換
     text = html.unescape(text)
     # デコードで生まれる非改行スペース(\xa0)を通常の半角スペースに統一
