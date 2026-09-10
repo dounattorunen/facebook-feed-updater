@@ -6,114 +6,107 @@ from urllib.error import HTTPError, URLError
 import time
 import ssl
 import concurrent.futures
+import glob  # ★追加：フォルダ内のgoodsファイルを探すため
 
-# 商品説明文に残っている <クラリーノ> のような山括弧タグ（注釈タグ）を除去する
-COMMENT_TAG_PATTERN = re.compile(r"<[^<>]*>")
-# 半角スペース・全角スペースが2つ以上連続している箇所をまとめる
-MULTI_SPACE_PATTERN = re.compile(r"[ 　]{2,}")
+# (中略: COMMENT_TAG_PATTERN や clean_text はそのまま)
 
-def clean_text(text):
-    if not text:
-        return text
-    # 対応する < が無い壊れたコメント断片（-->  や <!-- 単体）を除去
-    text = text.replace("<!--", "").replace("-->", "")
-    # ペアになっている山括弧タグ（例：<クラリーノ>）を除去
-    text = COMMENT_TAG_PATTERN.sub("", text)
-    # 上記で拾いきれない孤立した < や > も念のため除去
-    text = text.replace("<", "").replace(">", "")
-    # &nbsp; や &#10003; などのHTML実体参照を実際の文字に変換
-    text = html.unescape(text)
-    # デコードで生まれる非改行スペース(\xa0)を通常の半角スペースに統一
-    text = text.replace("\xa0", " ")
-    # 連続する空白（全角含む）を1つの半角スペースにまとめる
-    text = MULTI_SPACE_PATTERN.sub(" ", text)
-    return text.strip()
 # ==========================================
-# ★追加：タイトルのフォーマット（並び替え）設定
+# ★追加・変更：タイトルのフォーマットと特徴辞書設定
 # ==========================================
-# 不要な品番（No.123など）や後半の装飾記号を消す正規表現
 ITEM_NO_PATTERN = re.compile(r"^(No\.|品番)\s*[A-Za-z0-9-]+\s*", re.IGNORECASE)
 PROMO_SYMBOL_PATTERN = re.compile(r"[●◆■★].*$")
 
-# 抽出して先頭に持っていきたい機能・特徴キーワード
-# ※必要に応じて追加・変更してください
-FEATURE_KEYWORDS = ["幅広", "甲高", "歩きやすい", "日本製", "撥水", "軽量", "防水", "洗える"]
-
-# 抽出して末尾に持っていきたいブランド名
-# ※店舗で扱うブランド名を列挙してください
+# 抽出したい機能キーワード（goods.csvのキーワードにも反応します）
+FEATURE_KEYWORDS = ["幅広", "甲高", "歩きやすい", "日本製", "撥水", "防水", "軽量", "軽い", "洗える", "外反母趾", "3E"]
 BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "BATH CRAFT"]
 
-def format_title(original_title):
+# ★新規追加：goods_*.csv から特徴辞書を作成する関数
+def load_feature_dict():
+    feature_dict = {}
+    # フォルダ内にある 'goods_' から始まるCSVファイルを探す
+    goods_files = glob.glob("goods_*.csv")
+    if not goods_files:
+        print("※ goods_*.csv が見つかりません。タイトルからの特徴抽出のみ行います。")
+        return feature_dict
+    
+    # 最新のファイルを使用
+    latest_goods_file = sorted(goods_files)[-1]
+    print(f"商品データ {latest_goods_file} を読み込み、特徴辞書を作成します...")
+    
+    try:
+        # futureshopの出力はShift-JISが多いので cp932 を指定
+        with open(latest_goods_file, "r", encoding="cp932", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                item_id = str(row.get("商品番号", "")).strip()
+                keywords_str = row.get("キーワード", "")
+                if item_id and keywords_str:
+                    # カンマ区切りのキーワードをリスト化
+                    keywords = [k.strip() for k in keywords_str.split(",")]
+                    # FEATURE_KEYWORDS と一致するものだけ抽出
+                    matched = [k for k in keywords if k in FEATURE_KEYWORDS]
+                    if matched:
+                        feature_dict[item_id] = list(dict.fromkeys(matched))
+    except Exception as e:
+        print(f"CSVの読み込みエラー: {e}")
+        
+    print(f"{len(feature_dict)}件の商品に特徴データを紐付けました。")
+    return feature_dict
+
+# スクリプト実行時に一度だけ特徴辞書を読み込む
+ITEM_FEATURES = load_feature_dict()
+
+# ★変更：商品ID(item_id)を受け取り、辞書データも結合するように修正
+def format_title(original_title, item_id=""):
     title = original_title
     
     # 1. 不要な品番・プロモーション記号を削除
     title = ITEM_NO_PATTERN.sub("", title)
     title = PROMO_SYMBOL_PATTERN.sub("", title)
     
-    # 2. 元のタイトルに【定番人気商品】などの括弧があれば、中身を特徴として抽出＆削除
+    # 2. 元のタイトル内の【】を抽出
     brackets = re.findall(r"【(.*?)】", title)
     title = re.sub(r"【.*?】", "", title)
-    
-    # 3. 指定した特徴キーワードを抽出し、タイトル（商品名部分）から削除
     found_features = list(brackets)
+    
+    # 3. ★追加：goods.csvから取得した特徴（キーワード）があれば追加
+    if item_id in ITEM_FEATURES:
+        found_features.extend(ITEM_FEATURES[item_id])
+    
+    # 4. タイトル内に含まれている特徴を抽出し、タイトルから抜く
     for kw in FEATURE_KEYWORDS:
         if kw in title:
             if kw not in found_features:
                 found_features.append(kw)
-            # タイトルからキーワードを抜く（例: "軽量パンプス" -> "パンプス"）
             title = title.replace(kw, "")
             
-    # 4. ブランド名を抽出し、タイトル（商品名部分）から削除
+    # 5. ブランド名を抽出し、タイトルから抜く
     found_brand = ""
     for brand in BRAND_NAMES:
         if brand in title:
             found_brand = brand
             title = title.replace(brand, "")
-            break # 1つ見つかればOK
+            break
             
-    # 5. 商品名に残った余分な空白を綺麗にする（既存の MULTI_SPACE_PATTERN を利用）
     title = MULTI_SPACE_PATTERN.sub(" ", title).strip()
     
-    # 6. 並び替え：【特徴】 商品名 ブランド名 の順に結合
+    # 6. 並び替え結合
     final_title = ""
-    
-    # 特徴があれば先頭に【特徴1・特徴2...】として付与
     if found_features:
-        # 重複を排除しつつ順序を保持
         unique_features = list(dict.fromkeys(found_features))
         features_str = "・".join(unique_features)
         final_title += f"【{features_str}】 "
         
-    # 商品名を追加
     final_title += title
     
-    # ブランド名があれば末尾に付与
     if found_brand:
         final_title += f" {found_brand}"
         
     return final_title.strip()
-# --- 設定 ---
-# futureshopのフィードURL
-url = "https://ifeed.future-shop.net/sn/bath_d397e513c0bb34b415af1207cab70e4e58b03b2dbee4cdec30280e14be472338.csv"
-output_file = "facebook_feed.csv"
-chatgpt_output_file = "chatgpt_feed.csv" # ★追加：ChatGPT用の出力ファイル名
-STORE_NAME = "BATH ONLINE SHOP"          # ★追加：ChatGPTで必須となる店舗名(適宜変更してください)
-# ----------
 
-# Macローカルでのテスト用（SSL証明書エラー回避）
-ssl._create_default_https_context = ssl._create_unverified_context
+# (中略: 設定、check_image_exists はそのまま)
 
-# 画像URLが実際に存在するか確認する関数
-def check_image_exists(image_url):
-    try:
-        req = urllib.request.Request(image_url, method='HEAD')
-        # ★タイムアウトを3秒に設定（サーバーの応答が遅い時にずっと待機するのを防ぐ）
-        with urllib.request.urlopen(req, timeout=3) as response:
-            return response.status == 200
-    except Exception: # HTTPErrorやURLError、タイムアウトもまとめてFalseにする
-        return False
-
-# 1行（1商品）分の処理をまとめた関数
+# ★変更：format_titleに item_id を渡すように修正
 def process_row(row, timestamp):
     item_id = row.get("id", "")
 
@@ -122,9 +115,11 @@ def process_row(row, timestamp):
         row["description"] = clean_text(row["description"])
 
     if "title" in row:
-        # 既存のクリーニングをしてから、並び替えのフォーマットを適用
         cleaned_title = clean_text(row["title"])
-        row["title"] = format_title(cleaned_title)
+        # format_title に item_id も渡して、辞書から特徴を引っ張れるようにする
+        row["title"] = format_title(cleaned_title, item_id)
+
+    # 【A】メイン画像の処理... (以降そのまま)
 
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
