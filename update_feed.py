@@ -117,10 +117,14 @@ def check_image_exists(image_url):
 def process_row(row, timestamp):
     item_id = row.get("id", "")
 
-    # 【0】説明文・タイトルのクリーニング（タグ除去・実体参照デコード・空白圧縮）
-    for field in ("description", "title"):
-        if field in row:
-            row[field] = clean_text(row[field])
+    # 【0】説明文・タイトルのクリーニングと再構成
+    if "description" in row:
+        row["description"] = clean_text(row["description"])
+
+    if "title" in row:
+        # 既存のクリーニングをしてから、並び替えのフォーマットを適用
+        cleaned_title = clean_text(row["title"])
+        row["title"] = format_title(cleaned_title)
 
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
