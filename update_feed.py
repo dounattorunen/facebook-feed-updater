@@ -184,7 +184,7 @@ def truncate_field(text, max_len):
 def process_row(row, timestamp):
     item_id = row.get("id", "")
 
-    # 【0】説明文：goods CSV（管理画面の生データ）を優先し、無ければ従来通りフィードの値を使う
+    # 【0-1】説明文：goods CSV（管理画面の生データ）を優先し、無ければ従来通りフィードの値を使う
     if item_id in ITEM_DESCRIPTIONS:
         raw_desc = ITEM_DESCRIPTIONS[item_id]
     else:
@@ -193,6 +193,11 @@ def process_row(row, timestamp):
     cleaned = clean_text(raw_desc)
     cleaned = re.sub(r"^カラーバリエーション\s*", "", cleaned)
     row["description"] = cleaned
+
+    # 【0-2】タイトル：クリーニング＋【特徴】製品名 ブランド名の並び替え
+    if "title" in row:
+        cleaned_title = clean_text(row["title"])
+        row["title"] = format_title(cleaned_title, item_id
 
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
