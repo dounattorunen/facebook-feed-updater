@@ -43,6 +43,15 @@ def clean_text(text):
     text = html.unescape(text)
     text = text.replace("\xa0", " ")
     text = MULTI_SPACE_PATTERN.sub(" ", text)
+    text = text.strip()
+    
+    # ★追加：説明文の最初の方にある「カラーバリエーション」や色名を飛ばして、
+    # 「No.」や「品番」から文章が始まるようにカットする
+    match = ITEM_NO_PATTERN.search(text)
+    # 最初から500文字以内に「No.」が見つかった場合、それより前をすべて消す
+    if match and match.start() < 500:
+        text = text[match.start():]
+        
     return text.strip()
 
 def load_feature_dict():
