@@ -78,6 +78,9 @@ ITEM_FEATURES = load_feature_dict()
 def format_title(original_title, item_id=""):
     title = original_title
     
+    # ★追加：一番最初に「※返品・交換不可※」などのネガティブワードをすべて削除
+    title = NEGATIVE_WORD_PATTERN.sub("", title)
+    
     # 不要な記号を削除
     title = ITEM_NO_PATTERN.sub("", title)
     title = PROMO_SYMBOL_PATTERN.sub("", title)
