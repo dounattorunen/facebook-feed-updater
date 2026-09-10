@@ -6,44 +6,61 @@ from urllib.error import HTTPError, URLError
 import time
 import ssl
 import concurrent.futures
-import glob  # ★追加：フォルダ内のgoodsファイルを探すため
-
-# (中略: COMMENT_TAG_PATTERN や clean_text はそのまま)
+import glob
 
 # ==========================================
-# ★追加・変更：タイトルのフォーマットと特徴辞書設定
+# 1. 基本設定
 # ==========================================
+# futureshopのフィードURL
+url = "https://ifeed.future-shop.net/sn/bath_d397e513c0bb34b415af1207cab70e4e58b03b2dbee4cdec30280e14be472338.csv"
+output_file = "facebook_feed.csv"
+chatgpt_output_file = "chatgpt_feed.csv" 
+STORE_NAME = "BATH ONLINE SHOP"          
+
+# Macローカルでのテスト用（SSL証明書エラー回避）
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# ==========================================
+# 2. テキスト処理・フォーマット設定
+# ==========================================
+COMMENT_TAG_PATTERN = re.compile(r"<[^<>]*>")
+MULTI_SPACE_PATTERN = re.compile(r"[  ]{2,}")
 ITEM_NO_PATTERN = re.compile(r"^(No\.|品番)\s*[A-Za-z0-9-]+\s*", re.IGNORECASE)
 PROMO_SYMBOL_PATTERN = re.compile(r"[●◆■★].*$")
 
-# 抽出したい機能キーワード（goods.csvのキーワードにも反応します）
+# 抽出したい機能キーワード
 FEATURE_KEYWORDS = ["幅広", "甲高", "歩きやすい", "日本製", "撥水", "防水", "軽量", "軽い", "洗える", "外反母趾", "3E"]
 BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "BATH CRAFT"]
 
-# ★新規追加：goods_*.csv から特徴辞書を作成する関数
+def clean_text(text):
+    if not text:
+        return text
+    text = text.replace("<!--", "").replace("-->", "")
+    text = COMMENT_TAG_PATTERN.sub("", text)
+    text = text.replace("<", "").replace(">", "")
+    text = html.unescape(text)
+    text = text.replace("\xa0", " ")
+    text = MULTI_SPACE_PATTERN.sub(" ", text)
+    return text.strip()
+
 def load_feature_dict():
     feature_dict = {}
-    # フォルダ内にある 'goods_' から始まるCSVファイルを探す
     goods_files = glob.glob("goods_*.csv")
     if not goods_files:
         print("※ goods_*.csv が見つかりません。タイトルからの特徴抽出のみ行います。")
         return feature_dict
     
-    # 最新のファイルを使用
     latest_goods_file = sorted(goods_files)[-1]
     print(f"商品データ {latest_goods_file} を読み込み、特徴辞書を作成します...")
     
     try:
-        # futureshopの出力はShift-JISが多いので cp932 を指定
         with open(latest_goods_file, "r", encoding="cp932", errors="replace") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 item_id = str(row.get("商品番号", "")).strip()
                 keywords_str = row.get("キーワード", "")
                 if item_id and keywords_str:
-                    # カンマ区切りのキーワードをリスト化
                     keywords = [k.strip() for k in keywords_str.split(",")]
-                    # FEATURE_KEYWORDS と一致するものだけ抽出
                     matched = [k for k in keywords if k in FEATURE_KEYWORDS]
                     if matched:
                         feature_dict[item_id] = list(dict.fromkeys(matched))
@@ -53,34 +70,33 @@ def load_feature_dict():
     print(f"{len(feature_dict)}件の商品に特徴データを紐付けました。")
     return feature_dict
 
-# スクリプト実行時に一度だけ特徴辞書を読み込む
+# 起動時に一度だけ特徴辞書を作成
 ITEM_FEATURES = load_feature_dict()
 
-# ★変更：商品ID(item_id)を受け取り、辞書データも結合するように修正
 def format_title(original_title, item_id=""):
     title = original_title
     
-    # 1. 不要な品番・プロモーション記号を削除
+    # 不要な記号を削除
     title = ITEM_NO_PATTERN.sub("", title)
     title = PROMO_SYMBOL_PATTERN.sub("", title)
     
-    # 2. 元のタイトル内の【】を抽出
+    # 既存の【】を抽出
     brackets = re.findall(r"【(.*?)】", title)
     title = re.sub(r"【.*?】", "", title)
     found_features = list(brackets)
     
-    # 3. ★追加：goods.csvから取得した特徴（キーワード）があれば追加
+    # goods.csvの特徴を追加
     if item_id in ITEM_FEATURES:
         found_features.extend(ITEM_FEATURES[item_id])
     
-    # 4. タイトル内に含まれている特徴を抽出し、タイトルから抜く
+    # タイトル内の特徴を抽出して削除
     for kw in FEATURE_KEYWORDS:
         if kw in title:
             if kw not in found_features:
                 found_features.append(kw)
             title = title.replace(kw, "")
             
-    # 5. ブランド名を抽出し、タイトルから抜く
+    # ブランド名を抽出して削除
     found_brand = ""
     for brand in BRAND_NAMES:
         if brand in title:
@@ -90,7 +106,7 @@ def format_title(original_title, item_id=""):
             
     title = MULTI_SPACE_PATTERN.sub(" ", title).strip()
     
-    # 6. 並び替え結合
+    # 並び替え結合
     final_title = ""
     if found_features:
         unique_features = list(dict.fromkeys(found_features))
@@ -104,9 +120,17 @@ def format_title(original_title, item_id=""):
         
     return final_title.strip()
 
-# (中略: 設定、check_image_exists はそのまま)
+# ==========================================
+# 3. 画像確認・行処理
+# ==========================================
+def check_image_exists(image_url):
+    try:
+        req = urllib.request.Request(image_url, method='HEAD')
+        with urllib.request.urlopen(req, timeout=3) as response:
+            return response.status == 200
+    except Exception:
+        return False
 
-# ★変更：format_titleに item_id を渡すように修正
 def process_row(row, timestamp):
     item_id = row.get("id", "")
 
@@ -116,10 +140,7 @@ def process_row(row, timestamp):
 
     if "title" in row:
         cleaned_title = clean_text(row["title"])
-        # format_title に item_id も渡して、辞書から特徴を引っ張れるようにする
         row["title"] = format_title(cleaned_title, item_id)
-
-    # 【A】メイン画像の処理... (以降そのまま)
 
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
@@ -143,6 +164,9 @@ def process_row(row, timestamp):
     row["additional_image_link"] = ",".join(additional_urls)
     return row
 
+# ==========================================
+# 4. メイン処理
+# ==========================================
 def main():
     print("フィードのダウンロードと追加画像の自動探索を開始します...")
     print("（並列処理モード：高速化バージョン）")
@@ -158,18 +182,13 @@ def main():
     if "additional_image_link" not in fieldnames:
         fieldnames.append("additional_image_link")
         
-    # イテレータをリスト化
     rows = list(reader)
     
-    # ★ここからが並列処理（一気に20件ずつ処理する）
     processed_rows = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        # map関数を使うことで、元のCSVの順番を保ったまま一気に処理できます
         processed_rows = list(executor.map(lambda r: process_row(r, timestamp), rows))
         
-    # ==========================================
-    # Facebook用フィードの保存 (元の処理そのまま)
-    # ==========================================
+    # Facebook用フィードの保存
     with open(output_file, "w", encoding="utf-8", newline="") as outfile:
         writer = csv.DictWriter(outfile, fieldnames=fieldnames)
         writer.writeheader()
@@ -177,10 +196,7 @@ def main():
         
     print(f"Facebook用フィードを出力しました: {output_file}")
     
-    # ==========================================
-    # ChatGPT用フィードの保存 (新規追加)
-    # ==========================================
-    # 1. カラム名の変換・追加
+    # ChatGPT用フィードの保存
     chatgpt_fieldnames = []
     for f in fieldnames:
         if f == "id": chatgpt_fieldnames.append("item_id")
@@ -191,7 +207,6 @@ def main():
     if "seller_name" not in chatgpt_fieldnames:
         chatgpt_fieldnames.append("seller_name")
         
-    # 2. データの中身の変換
     chatgpt_rows = []
     for row in processed_rows:
         new_row = {}
@@ -203,16 +218,13 @@ def main():
             elif k == "image_link": 
                 new_row["image_url"] = v
             elif k == "availability":
-                # OpenAIの仕様に合わせてアンダースコアに置換 (in stock -> in_stock)
                 new_row["availability"] = str(v).replace(" ", "_")
             else:
                 new_row[k] = v
                 
-        # 必須項目の店舗名を追加
         new_row["seller_name"] = STORE_NAME
         chatgpt_rows.append(new_row)
         
-    # 3. CSVファイルとして保存
     with open(chatgpt_output_file, "w", encoding="utf-8", newline="") as outfile_chatgpt:
         writer_chatgpt = csv.DictWriter(outfile_chatgpt, fieldnames=chatgpt_fieldnames)
         writer_chatgpt.writeheader()
