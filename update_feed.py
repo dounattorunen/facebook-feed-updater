@@ -101,10 +101,6 @@ def load_title_dict():
         print(f"商品名の読み込みエラー: {e}")
     print(f"{len(title_dict)}件の商品に管理画面の商品名を紐付けました。")
     return title_dict
-
-ITEM_DESCRIPTIONS = load_description_dict()
-ITEM_FEATURES = load_feature_dict()
-ITEM_TITLES = load_title_dict()   # ← これを追加
 def strip_html_to_text(html_text):
     """管理画面の商品説明文HTMLをプレーンテキストに変換"""
     if not html_text:
