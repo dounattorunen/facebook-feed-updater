@@ -212,7 +212,17 @@ def process_row(row, timestamp):
     
     row["additional_image_link"] = ",".join(additional_urls)
     return row
+def truncate_field(text, max_len):
+    if text and len(text) > max_len:
+        return text[:max_len].rstrip()
+    return text
 
+def process_row(row, timestamp):
+    ...
+    # 出力直前に安全のため文字数をハードリミット内に収める
+    row["description"] = truncate_field(row["description"], 5000)
+    row["title"] = truncate_field(row["title"], 150)
+    ...
 # ==========================================
 # 4. メイン処理
 # ==========================================
