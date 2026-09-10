@@ -81,6 +81,30 @@ def load_feature_dict():
         
     print(f"{len(feature_dict)}件の商品に特徴データを紐付けました。")
     return feature_dict
+def load_title_dict():
+    """goods_*.csv の「商品名」を商品番号ベースで辞書化（futureshop自動フィードのtitleは
+    40文字強でカットされてしまうため、こちらを優先する）"""
+    title_dict = {}
+    goods_files = glob.glob("goods_*.csv")
+    if not goods_files:
+        return title_dict
+    latest_goods_file = sorted(goods_files)[-1]
+    try:
+        with open(latest_goods_file, "r", encoding="cp932", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                item_id = str(row.get("商品番号", "")).strip()
+                name = row.get("商品名", "").strip()
+                if item_id and name:
+                    title_dict[item_id] = name
+    except Exception as e:
+        print(f"商品名の読み込みエラー: {e}")
+    print(f"{len(title_dict)}件の商品に管理画面の商品名を紐付けました。")
+    return title_dict
+
+ITEM_DESCRIPTIONS = load_description_dict()
+ITEM_FEATURES = load_feature_dict()
+ITEM_TITLES = load_title_dict()   # ← これを追加
 def strip_html_to_text(html_text):
     """管理画面の商品説明文HTMLをプレーンテキストに変換"""
     if not html_text:
