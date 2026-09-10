@@ -26,6 +26,8 @@ ssl._create_default_https_context = ssl._create_unverified_context
 COMMENT_TAG_PATTERN = re.compile(r"<[^<>]*>")
 MULTI_SPACE_PATTERN = re.compile(r"[  ]{2,}")
 ITEM_NO_PATTERN = re.compile(r"^(No\.|品番)\s*[A-Za-z0-9-]+\s*", re.IGNORECASE)
+# ★追加：説明文の途中にあっても見つけ出せるパターン（先頭縛りの ^ を外したもの）
+DESC_NO_PATTERN = re.compile(r"(No\.|品番)\s*[A-Za-z0-9-]+\s*", re.IGNORECASE)
 PROMO_SYMBOL_PATTERN = re.compile(r"[●◆■★].*$")
 # ★追加：返品交換不可などのネガティブワードをまとめて削除する正規表現
 NEGATIVE_WORD_PATTERN = re.compile(r"※?(返品・交換不可|交換返品不可|返品交換不可)※?")
@@ -44,10 +46,9 @@ def clean_text(text):
     text = text.replace("\xa0", " ")
     text = MULTI_SPACE_PATTERN.sub(" ", text)
     text = text.strip()
-    
-    # ★追加：説明文の最初の方にある「カラーバリエーション」や色名を飛ばして、
+    # ★変更：説明文の最初の方にある「カラーバリエーション」や色名を飛ばして、
     # 「No.」や「品番」から文章が始まるようにカットする
-    match = ITEM_NO_PATTERN.search(text)
+    match = DESC_NO_PATTERN.search(text)
     # 最初から500文字以内に「No.」が見つかった場合、それより前をすべて消す
     if match and match.start() < 500:
         text = text[match.start():]
