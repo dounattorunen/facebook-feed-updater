@@ -114,7 +114,23 @@ def load_description_dict():
 ITEM_DESCRIPTIONS = load_description_dict()
 # 起動時に一度だけ特徴辞書を作成
 ITEM_FEATURES = load_feature_dict()
+# titleのクリーニングはHTML除去のみ。description用のNo.カット処理は使わない
+def clean_title_text(text):
+    if not text:
+        return text
+    text = text.replace("<!--", "").replace("-->", "")
+    text = COMMENT_TAG_PATTERN.sub("", text)
+    text = text.replace("<", "").replace(">", "")
+    text = html.unescape(text)
+    text = text.replace("\xa0", " ")
+    text = MULTI_SPACE_PATTERN.sub(" ", text)
+    return text.strip()
 
+# 位置を問わず「No./NO,/№/品番」＋番号（スラッシュ区切りの複数品番も含む）を除去
+ITEM_NO_PATTERN = re.compile(
+    r"(№|No[\.,、]?|品番)\s*[0-9A-Za-z\-]+(?:\s*[/／]\s*[0-9A-Za-z\-]+)*\s*",
+    re.IGNORECASE
+)
 def format_title(original_title, item_id=""):
     title = original_title
     
@@ -194,10 +210,14 @@ def process_row(row, timestamp):
     cleaned = re.sub(r"^カラーバリエーション\s*", "", cleaned)
     row["description"] = cleaned
 
-    # 【0-2】タイトル：クリーニング＋【特徴】製品名 ブランド名の並び替え
-    if "title" in row:
-        cleaned_title = clean_text(row["title"])
-        row["title"] = format_title(cleaned_title, item_id
+    # 【0-2】タイトル：goods CSVの商品名を優先。専用の軽いクリーニングを使う（clean_textは使わない）
+    if item_id in ITEM_TITLES:
+        raw_title = ITEM_TITLES[item_id]
+    else:
+        raw_title = row.get("title", "")
+
+    cleaned_title = clean_title_text(raw_title)
+    row["title"] = format_title(cleaned_title, item_id)
 
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
