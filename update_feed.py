@@ -81,7 +81,37 @@ def load_feature_dict():
         
     print(f"{len(feature_dict)}件の商品に特徴データを紐付けました。")
     return feature_dict
+def strip_html_to_text(html_text):
+    """管理画面の商品説明文HTMLをプレーンテキストに変換"""
+    if not html_text:
+        return ""
+    text = re.sub(r"<!--.*?-->", "", html_text, flags=re.DOTALL)  # コメントごと削除
+    text = re.sub(r"<[^>]+>", " ", text)                          # タグを空白に
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
+def load_description_dict():
+    """goods_*.csv の「商品説明文」を商品番号ベースで辞書化"""
+    desc_dict = {}
+    goods_files = glob.glob("goods_*.csv")
+    if not goods_files:
+        return desc_dict
+    latest_goods_file = sorted(goods_files)[-1]
+    try:
+        with open(latest_goods_file, "r", encoding="cp932", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                item_id = str(row.get("商品番号", "")).strip()
+                raw_html = row.get("商品説明文", "")
+                if item_id and raw_html:
+                    desc_dict[item_id] = strip_html_to_text(raw_html)
+    except Exception as e:
+        print(f"商品説明文の読み込みエラー: {e}")
+    print(f"{len(desc_dict)}件の商品に管理画面の説明文を紐付けました。")
+    return desc_dict
+
+ITEM_DESCRIPTIONS = load_description_dict()
 # 起動時に一度だけ特徴辞書を作成
 ITEM_FEATURES = load_feature_dict()
 
@@ -149,13 +179,17 @@ def check_image_exists(image_url):
 def process_row(row, timestamp):
     item_id = row.get("id", "")
 
-    # 【0】説明文・タイトルのクリーニングと再構成
-    if "description" in row:
-        row["description"] = clean_text(row["description"])
+    # 【0】説明文：goods CSV（管理画面の生データ）を優先し、無ければ従来通りフィードの値を使う
+    if item_id in ITEM_DESCRIPTIONS:
+        raw_desc = ITEM_DESCRIPTIONS[item_id]
+    else:
+        raw_desc = row.get("description", "")
 
-    if "title" in row:
-        cleaned_title = clean_text(row["title"])
-        row["title"] = format_title(cleaned_title, item_id)
+    cleaned = clean_text(raw_desc)
+    # カラーバリエーションの見出し語だけ残ってしまうケース（マーカーが無く直接本文が続く場合）への保険
+    cleaned = re.sub(r"^カラーバリエーション\s*", "", cleaned)
+    row["description"] = cleaned
+    ...
 
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
