@@ -27,7 +27,7 @@ COMMENT_TAG_PATTERN = re.compile(r"<[^<>]*>")
 MULTI_SPACE_PATTERN = re.compile(r"[  ]{2,}")
 ITEM_NO_PATTERN = re.compile(r"^(No\.|品番)\s*[A-Za-z0-9-]+\s*", re.IGNORECASE)
 # ★追加：説明文の途中にあっても見つけ出せるパターン（先頭縛りの ^ を外したもの）
-DESC_NO_PATTERN = re.compile(r"(No\.|品番)\s*[A-Za-z0-9-]+\s*", re.IGNORECASE)
+DESC_NO_PATTERN = re.compile(r"(No[\.,、]|品番)\s*[A-Za-z0-9\-]+\s*", re.IGNORECASE)
 PROMO_SYMBOL_PATTERN = re.compile(r"[●◆■★].*$")
 # ★追加：返品交換不可などのネガティブワードをまとめて削除する正規表現
 NEGATIVE_WORD_PATTERN = re.compile(r"※?(返品・交換不可|交換返品不可|返品交換不可)※?")
