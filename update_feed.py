@@ -28,7 +28,70 @@ def clean_text(text):
     # 連続する空白（全角含む）を1つの半角スペースにまとめる
     text = MULTI_SPACE_PATTERN.sub(" ", text)
     return text.strip()
+# ==========================================
+# ★追加：タイトルのフォーマット（並び替え）設定
+# ==========================================
+# 不要な品番（No.123など）や後半の装飾記号を消す正規表現
+ITEM_NO_PATTERN = re.compile(r"^(No\.|品番)\s*[A-Za-z0-9-]+\s*", re.IGNORECASE)
+PROMO_SYMBOL_PATTERN = re.compile(r"[●◆■★].*$")
 
+# 抽出して先頭に持っていきたい機能・特徴キーワード
+# ※必要に応じて追加・変更してください
+FEATURE_KEYWORDS = ["幅広", "甲高", "歩きやすい", "日本製", "撥水", "軽量", "防水", "洗える"]
+
+# 抽出して末尾に持っていきたいブランド名
+# ※店舗で扱うブランド名を列挙してください
+BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "BATH CRAFT"]
+
+def format_title(original_title):
+    title = original_title
+    
+    # 1. 不要な品番・プロモーション記号を削除
+    title = ITEM_NO_PATTERN.sub("", title)
+    title = PROMO_SYMBOL_PATTERN.sub("", title)
+    
+    # 2. 元のタイトルに【定番人気商品】などの括弧があれば、中身を特徴として抽出＆削除
+    brackets = re.findall(r"【(.*?)】", title)
+    title = re.sub(r"【.*?】", "", title)
+    
+    # 3. 指定した特徴キーワードを抽出し、タイトル（商品名部分）から削除
+    found_features = list(brackets)
+    for kw in FEATURE_KEYWORDS:
+        if kw in title:
+            if kw not in found_features:
+                found_features.append(kw)
+            # タイトルからキーワードを抜く（例: "軽量パンプス" -> "パンプス"）
+            title = title.replace(kw, "")
+            
+    # 4. ブランド名を抽出し、タイトル（商品名部分）から削除
+    found_brand = ""
+    for brand in BRAND_NAMES:
+        if brand in title:
+            found_brand = brand
+            title = title.replace(brand, "")
+            break # 1つ見つかればOK
+            
+    # 5. 商品名に残った余分な空白を綺麗にする（既存の MULTI_SPACE_PATTERN を利用）
+    title = MULTI_SPACE_PATTERN.sub(" ", title).strip()
+    
+    # 6. 並び替え：【特徴】 商品名 ブランド名 の順に結合
+    final_title = ""
+    
+    # 特徴があれば先頭に【特徴1・特徴2...】として付与
+    if found_features:
+        # 重複を排除しつつ順序を保持
+        unique_features = list(dict.fromkeys(found_features))
+        features_str = "・".join(unique_features)
+        final_title += f"【{features_str}】 "
+        
+    # 商品名を追加
+    final_title += title
+    
+    # ブランド名があれば末尾に付与
+    if found_brand:
+        final_title += f" {found_brand}"
+        
+    return final_title.strip()
 # --- 設定 ---
 # futureshopのフィードURL
 url = "https://ifeed.future-shop.net/sn/bath_d397e513c0bb34b415af1207cab70e4e58b03b2dbee4cdec30280e14be472338.csv"
