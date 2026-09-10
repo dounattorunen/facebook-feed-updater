@@ -114,6 +114,7 @@ def load_description_dict():
 ITEM_DESCRIPTIONS = load_description_dict()
 # 起動時に一度だけ特徴辞書を作成
 ITEM_FEATURES = load_feature_dict()
+ITEM_TITLES = load_title_dict()
 # titleのクリーニングはHTML除去のみ。description用のNo.カット処理は使わない
 def clean_title_text(text):
     if not text:
