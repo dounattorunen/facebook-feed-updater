@@ -176,6 +176,11 @@ def check_image_exists(image_url):
     except Exception:
         return False
 
+def truncate_field(text, max_len):
+    if text and len(text) > max_len:
+        return text[:max_len].rstrip()
+    return text
+
 def process_row(row, timestamp):
     item_id = row.get("id", "")
 
@@ -186,17 +191,15 @@ def process_row(row, timestamp):
         raw_desc = row.get("description", "")
 
     cleaned = clean_text(raw_desc)
-    # カラーバリエーションの見出し語だけ残ってしまうケース（マーカーが無く直接本文が続く場合）への保険
     cleaned = re.sub(r"^カラーバリエーション\s*", "", cleaned)
     row["description"] = cleaned
-    ...
 
     # 【A】メイン画像の処理
     original_url = row.get("image_link", "")
     if original_url:
         separator = "&" if "?" in original_url else "?"
         row["image_link"] = f"{original_url}{separator}v={timestamp}"
-    
+
     # 【B】追加画像のルールベース自動生成
     additional_urls = []
     if item_id:
@@ -204,25 +207,17 @@ def process_row(row, timestamp):
         for i in range(2, 7):
             img_num = f"{i:02d}"
             test_url = f"https://bath.fs-storage.jp/fs2cabinet/{dir_prefix}/{item_id}/{item_id}-m-{img_num}-pl.jpg"
-            
             if check_image_exists(test_url):
                 additional_urls.append(f"{test_url}?v={timestamp}")
             else:
-                break 
-    
+                break
     row["additional_image_link"] = ",".join(additional_urls)
-    return row
-def truncate_field(text, max_len):
-    if text and len(text) > max_len:
-        return text[:max_len].rstrip()
-    return text
 
-def process_row(row, timestamp):
-    ...
-    # 出力直前に安全のため文字数をハードリミット内に収める
+    # 【C】文字数の安全装置（Facebook/ChatGPT両フィードとも上限5000/150文字）
     row["description"] = truncate_field(row["description"], 5000)
     row["title"] = truncate_field(row["title"], 150)
-    ...
+
+    return row
 # ==========================================
 # 4. メイン処理
 # ==========================================
