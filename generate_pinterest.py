@@ -1,150 +1,228 @@
-"""
-縦長ピン画像（1000x1500・生成りの帯）と、Pinterest「ピンの一括作成」用CSVを作る。
-facebook_feed.csv（update_feed.py の出力）を読み、まだCSV投稿していない在庫あり商品から
-1日 PER_DAY 件ずつ公開日時を割り振る。
-"""
 import csv
-import io
+import html
 import json
 import os
-import urllib.request
-from datetime import datetime, timedelta, timezone
-
-from PIL import Image, ImageDraw, ImageFont
-
-from generate_pinterest import (split_title, build_title, build_description,
-                                detect_category, strip_cache_param)
+import re
+from datetime import date, datetime, timedelta, timezone
+from email.utils import format_datetime
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 # ==========================================
 # 設定
 # ==========================================
 INPUT_FILE = "facebook_feed.csv"
-IMAGE_DIR = "pin_images"                       # 生成画像の保存先（FTPの pinterest/img/ に上げる）
-IMAGE_BASE_URL = "https://www.bath-ec.com/pinterest/img/"
-OUTPUT_CSV = "pinterest_bulk.csv"              # Pinterestにアップロードするファイル
-DONE_FILE = "pinterest_csv_done.json"          # CSVに載せた商品の記録（要コミット）
+OUTPUT_DIR = "."                         # カテゴリ別フィードの出力先（pinterest_feed.xmlと同じ場所）
+ALL_FEED_FILE = "pinterest_feed.xml"     # 従来の全件フィード（互換用）
+STATE_FILE = "pinterest_seen.json"       # 初めてフィードに載った日を記録（要コミット）
 
-PER_DAY = 2                                    # 1日に公開する件数
-DAYS = 28                                      # 何日分を1回のCSVに入れるか（予約は30日先まで）
-PUBLISH_HOURS = [12, 20]                       # 公開する時刻（日本時間）。CSVにはUTCに変換して出力
-SHOP_NAME = "BATH ONLINE SHOP"
-UTM = "utm_source=pinterest&utm_medium=social&utm_campaign=csv_vertical"
+SHOP_TITLE = "BATH ONLINE SHOP"
+SHOP_LINK = "https://www.bath-ec.com"
 
-# デザイン（生成り）
-W, H, BAND = 1000, 1500, 250
-BG, INK, SUB = (244, 240, 233), (51, 45, 40), (120, 110, 100)
-FONT_DIR = "/usr/share/fonts/opentype/noto/"
-FONT_BOLD = FONT_DIR + "NotoSansCJK-Bold.ttc"
-FONT_REG = FONT_DIR + "NotoSansCJK-Regular.ttc"
+NEW_ONLY_DAYS = 14        # 初登場からこの日数以内の商品だけをフィードに載せる
+FALLBACK_ITEMS = 1        # 新作が無いカテゴリにも最低この件数を載せる（空フィードはPinterestがエラーにするため）
+TITLE_MAX = 100           # Pinterestのタイトル上限
+DESC_MAX = 500            # Pinterestの説明文上限
+PREFERRED_IMAGE = 1       # 1=メイン画像, 2=追加画像1枚目(-m-02), 3=-m-03 …（着用画像の番号に合わせて変更）
+UTM = {"utm_source": "pinterest", "utm_medium": "social", "utm_campaign": "rss_new_arrivals"}
 
+# (タイトルに含まれる語, ファイル名, 対応ボード) 上から順に判定。長い語・紛らわしい語を先に
+CATEGORIES = [
+    ("ルームシューズ", "room-shoes", "洗えるルームシューズ"),
+    ("レインシューズ", "rain", "レインシューズ"),
+    ("レインブーツ", "rain", "レインシューズ"),
+    ("パンプス", "pumps", "洗えるパンプス"),
+    ("サンダル", "sandals", "洗えるサンダル"),
+    ("ローファー", "loafers", "洗えるローファー"),
+    ("モカシン", "moccasins", "洗えるモカシン"),
+    ("スニーカー", "sneakers", "洗えるスニーカー"),
+    ("ブーツ", "boots", "洗えるブーツ"),
+]
+OTHER_CATEGORY = ("other", "その他")
 
-def font(path, size):
-    return ImageFont.truetype(path, size, index=0)  # index 0 = 日本語(JP)
-
-
-def fit_font(draw, text, path, size, min_size, max_w):
-    """幅に収まるまで文字を小さくする。最小でも収まらなければ末尾を…で省略"""
-    while size > min_size and draw.textlength(text, font=font(path, size)) > max_w:
-        size -= 2
-    f = font(path, size)
-    while draw.textlength(text, font=f) > max_w and len(text) > 1:
-        text = text[:-2] + "…"
-    return text, f
-
-
-def draw_center(draw, y, text, f, fill):
-    w = draw.textlength(text, font=f)
-    draw.text(((W - w) / 2, y), text, font=f, fill=fill)
+BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "BATH CRAFT", "newmo", "elevage"]
+ITEM_NO_PATTERN = re.compile(r"^\s*(№|No[\.,、]?|品番)\s*[0-9A-Za-z\-]+(?:\s*[/／]\s*[0-9A-Za-z\-]+)*\s*", re.IGNORECASE)
 
 
-def make_image(src_url, headline, subline, footer, out_path):
-    with urllib.request.urlopen(src_url, timeout=20) as r:
-        src = Image.open(io.BytesIO(r.read())).convert("RGB")
-    # 正方形でない画像は中央を正方形に切り抜く
-    s = min(src.size)
-    left, top = (src.width - s) // 2, (src.height - s) // 2
-    src = src.crop((left, top, left + s, top + s)).resize((W, W), Image.LANCZOS)
+# ==========================================
+# テキスト整形
+# ==========================================
+def split_title(title):
+    """update_feed.py が作った『【特徴・特徴】 商品名 ブランド』を分解"""
+    features, body = [], title.strip()
+    m = re.match(r"^【(.*?)】\s*(.*)$", body)
+    if m:
+        features = [f for f in m.group(1).split("・") if f]
+        body = m.group(2)
+    brand = ""
+    for b in BRAND_NAMES:
+        if body.endswith(b):
+            brand, body = b, body[: -len(b)].strip()
+            break
+    return features, body, brand
 
-    im = Image.new("RGB", (W, H), BG)
-    im.paste(src, (0, BAND))
-    d = ImageDraw.Draw(im)
-    t, f = fit_font(d, headline, FONT_BOLD, 52, 38, W - 100)
-    draw_center(d, 70, t, f, INK)
-    if subline:
-        t, f = fit_font(d, subline, FONT_REG, 36, 28, W - 100)
-        draw_center(d, 155, t, f, SUB)
-    t, f = fit_font(d, footer, FONT_REG, 34, 26, W - 100)
-    draw_center(d, BAND + W + 80, t, f, SUB)
-    im.save(out_path, "JPEG", quality=88)
+
+def build_title(features, name, brand):
+    """検索されやすい『洗える＋アイテム名』を先頭に。特徴は2〜3個まで"""
+    if "洗える" in features and "洗える" not in name:
+        name = "洗える" + name
+    others = [f for f in features if f != "洗える"][:3]
+    title = name
+    if others:
+        title += "｜" + "・".join(others)
+    if brand and len(title) + len(brand) + 1 <= TITLE_MAX:
+        title += " " + brand
+    return title[:TITLE_MAX]
+
+
+def build_description(features, name, raw_desc):
+    """冒頭に商品名と特徴を置き、品番から始まらないようにする"""
+    body = ITEM_NO_PATTERN.sub("", raw_desc or "").strip()
+    if "洗える" in features and "洗える" not in name:
+        name = "洗える" + name
+    others = [f for f in features if f != "洗える"]
+    lead = f"{name}。"
+    if others:
+        lead += "・".join(others) + "。"
+    desc = f"{lead} {body}".strip()
+    return desc[:DESC_MAX].rstrip()
+
+
+# ==========================================
+# URL整形
+# ==========================================
+def strip_cache_param(url):
+    """update_feed.py が付ける ?v=タイムスタンプ を除去（毎回URLが変わるのを防ぐ）"""
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query) if k != "v"]
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def pick_image(row):
+    images = [row.get("image_link", "")]
+    images += [u for u in row.get("additional_image_link", "").split(",") if u]
+    idx = PREFERRED_IMAGE - 1
+    url = images[idx] if 0 <= idx < len(images) else images[0]
+    return strip_cache_param(url)
+
+
+def add_utm(link):
+    parts = urlsplit(link)
+    query = parse_qsl(parts.query)
+    if not any(k.startswith("utm_") for k, _ in query):
+        query += list(UTM.items())
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def detect_category(name):
+    for word, slug, board in CATEGORIES:
+        if word in name:
+            return slug, board
+    return OTHER_CATEGORY
+
+
+# ==========================================
+# 初登場日の管理
+# ==========================================
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return None
+    with open(STATE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=0, sort_keys=True)
+
+
+# ==========================================
+# RSS出力
+# ==========================================
+def write_rss(path, channel_title, items):
+    e = html.escape
+    out = ['<?xml version="1.0" encoding="UTF-8"?>', '<rss version="2.0">', "<channel>",
+           f"  <title>{e(channel_title)}</title>", f"  <link>{SHOP_LINK}</link>",
+           f"  <description>{e(channel_title)} 新作</description>"]
+    for it in items:
+        out += ["  <item>",
+                f"    <title>{e(it['title'])}</title>",
+                f"    <link>{e(it['link'])}</link>",
+                f"    <description>{e(it['description'])}</description>",
+                f'    <enclosure url="{e(it["image"])}" type="image/jpeg" length="0" />',
+                f'    <guid isPermaLink="false">{e(it["id"])}</guid>',
+                f"    <pubDate>{it['pub_date']}</pubDate>",
+                "  </item>"]
+    out += ["</channel>", "</rss>"]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out))
 
 
 def main():
-    with open(INPUT_FILE, "r", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    done = {}
-    if os.path.exists(DONE_FILE):
-        with open(DONE_FILE, "r", encoding="utf-8") as f:
-            done = json.load(f)
+    try:
+        with open(INPUT_FILE, "r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    except FileNotFoundError:
+        print(f"エラー: {INPUT_FILE} が見つかりません。")
+        return
 
-    os.makedirs(IMAGE_DIR, exist_ok=True)
-    limit = PER_DAY * DAYS
-    start = datetime.now(timezone(timedelta(hours=9))).date() + timedelta(days=1)  # 明日から
-    out_rows = []
+    today = date.today().isoformat()
+    state = load_state()
+    first_run = state is None
+    if first_run:
+        # 初回は既存商品をすべて「過去分」として登録し、一斉にピン化されるのを防ぐ
+        state = {}
+        print("初回実行：既存商品を登録済みとして扱います（次回の新作から配信）。")
+
+    cutoff = (date.today() - timedelta(days=NEW_ONLY_DAYS)).isoformat()
+    feeds = {}   # slug -> (board, [items])
+    fallback = {}  # slug -> [(初登場日, item)]  新作が無いカテゴリ用の候補
+    all_items = []
 
     for row in rows:
-        if len(out_rows) >= limit:
-            break
         item_id = row.get("id", "").strip()
-        if not item_id or item_id in done:
+        if not item_id:
             continue
-        if row.get("availability", "").strip().lower() in ("out of stock", "在庫切れ"):
-            continue
+        if item_id not in state:
+            state[item_id] = "2000-01-01" if first_run else today
 
+        availability = row.get("availability", "").strip().lower()
+        if availability in ("out of stock", "在庫切れ"):
+            continue
         features, name, brand = split_title(row.get("title", ""))
         slug, board = detect_category(name)
-        if slug == "other":
-            continue  # 靴以外はボードが決まっていないので対象外
+        first_seen = datetime.fromisoformat(state[item_id]).replace(hour=9, tzinfo=timezone.utc)
 
-        headline = ("洗える" + name) if ("洗える" in features and "洗える" not in name) else name
-        subline = "・".join([x for x in features if x != "洗える"][:3])
-        footer = f"{brand} ｜ {SHOP_NAME}" if brand else SHOP_NAME
-        img_name = f"{item_id}.jpg"
-        try:
-            make_image(strip_cache_param(row.get("image_link", "")), headline, subline,
-                       footer, os.path.join(IMAGE_DIR, img_name))
-        except Exception as e:
-            print(f"  画像生成スキップ {item_id}: {e}")
+        item = {
+            "id": item_id,
+            "title": build_title(features, name, brand),
+            "description": build_description(features, name, row.get("description", "")),
+            "link": add_utm(row.get("link", "")),
+            "image": pick_image(row),
+            "pub_date": format_datetime(first_seen),  # 毎回変わらないよう初登場日で固定
+        }
+        if state[item_id] < cutoff:
+            # 新作期間を過ぎた商品は、カテゴリが空になったときの予備としてだけ保持
+            fallback.setdefault(slug, []).append((state[item_id], item))
             continue
+        feeds.setdefault(slug, (board, []))[1].append(item)
+        all_items.append(item)
 
-        n = len(out_rows)
-        day = start + timedelta(days=n // PER_DAY)
-        hour = PUBLISH_HOURS[n % PER_DAY % len(PUBLISH_HOURS)]
-        # Pinterestの公開日時はUTC指定なので、日本時間から9時間引く
-        publish_utc = datetime(day.year, day.month, day.day, hour) - timedelta(hours=9)
-        link = row.get("link", "")
-        link += ("&" if "?" in link else "?") + UTM
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    slugs = {slug for _, slug, _ in CATEGORIES} | {OTHER_CATEGORY[0]}
+    boards = {slug: board for _, slug, board in CATEGORIES}
+    boards[OTHER_CATEGORY[0]] = OTHER_CATEGORY[1]
+    for slug in sorted(slugs):
+        board, items = feeds.get(slug, (boards[slug], []))
+        if not items and fallback.get(slug):
+            # 初登場日が新しい順（同日ならフィードの並び順）で予備を載せる
+            cands = sorted(fallback[slug], key=lambda x: x[0], reverse=True)
+            items = [it for _, it in cands[:FALLBACK_ITEMS]]
+        write_rss(os.path.join(OUTPUT_DIR, f"pinterest_{slug}.xml"), f"{SHOP_TITLE} {board}", items)
+        print(f"  {slug:<11} → {board}: {len(items)}件")
 
-        out_rows.append({
-            "Title": build_title(features, name, brand),
-            "Media URL": IMAGE_BASE_URL + img_name,
-            "Pinterest board": board,
-            "Thumbnail": "",
-            "Description": build_description(features, name, row.get("description", "")),
-            "Link": link,
-            "Publish date": publish_utc.strftime("%Y-%m-%dT%H:%M:%S"),
-            "Keywords": ",".join(features),
-        })
-        done[item_id] = day.isoformat()
-        print(f"  {item_id} → {board} / {day} {hour}時")
-
-    with open(OUTPUT_CSV, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["Title", "Media URL", "Pinterest board", "Thumbnail",
-                                          "Description", "Link", "Publish date", "Keywords"])
-        w.writeheader()
-        w.writerows(out_rows)
-    with open(DONE_FILE, "w", encoding="utf-8") as f:
-        json.dump(done, f, ensure_ascii=False, indent=0, sort_keys=True)
-    print(f"{len(out_rows)}件のピンを {OUTPUT_CSV} に出力しました。")
+    write_rss(ALL_FEED_FILE, SHOP_TITLE, all_items)
+    save_state(state)
+    print(f"Pinterest用フィードを生成しました（新作{len(all_items)}件）。")
 
 
 if __name__ == "__main__":
