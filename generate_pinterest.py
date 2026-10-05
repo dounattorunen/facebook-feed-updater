@@ -43,6 +43,19 @@ BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "
 ITEM_NO_PATTERN = re.compile(r"^\s*(№|No[\.,、]?|品番)\s*[0-9A-Za-z\-]+(?:\s*[/／]\s*[0-9A-Za-z\-]+)*\s*", re.IGNORECASE)
 
 
+# 商品名から外すもの：(レディース 女性用…)などの括弧書き、※返品対応可 などの注記
+PAREN_PATTERN = re.compile(r"\s*[（(\[［〔][^）)\]］〕]*[）)\]］〕]?")
+NOTE_PATTERN = re.compile(r"\s*※[^※]*※?")
+# 特徴として扱わない販促ワード（タイトルの【】に入っていることがある）
+PROMO_PATTERN = re.compile(r"新作|新色|人気|返品|送料|セール|SALE|限定|再入荷|OFF|ポイント|予約", re.IGNORECASE)
+
+
+def clean_name(text):
+    text = PAREN_PATTERN.sub("", text)
+    text = NOTE_PATTERN.sub("", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
 # ==========================================
 # テキスト整形
 # ==========================================
@@ -51,14 +64,14 @@ def split_title(title):
     features, body = [], title.strip()
     m = re.match(r"^【(.*?)】\s*(.*)$", body)
     if m:
-        features = [f for f in m.group(1).split("・") if f]
+        features = [f for f in m.group(1).split("・") if f and not PROMO_PATTERN.search(f)]
         body = m.group(2)
     brand = ""
     for b in BRAND_NAMES:
         if body.endswith(b):
             brand, body = b, body[: -len(b)].strip()
             break
-    return features, body, brand
+    return features, clean_name(body), brand
 
 
 def build_title(features, name, brand):
