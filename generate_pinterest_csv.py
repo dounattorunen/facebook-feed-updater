@@ -133,6 +133,9 @@ def main():
         slug, board = detect_category(name)
         if slug == "other":
             continue  # 靴以外はボードが決まっていないので対象外
+        title = build_title(features, name, brand)
+        if "title:" + title in done:
+            continue  # 色違いなどで同じタイトルの商品は1件だけ（Pinterestは同一タイトルをエラーにする）
 
         headline = clean_headline(name)
         headline = ("洗える" + headline) if ("洗える" in features and "洗える" not in headline) else headline
@@ -155,7 +158,7 @@ def main():
         link += ("&" if "?" in link else "?") + UTM
 
         out_rows.append({
-            "Title": build_title(features, name, brand),
+            "Title": title,
             "Media URL": IMAGE_BASE_URL + img_name,
             "Pinterest board": board,
             "Thumbnail": "",
@@ -165,6 +168,7 @@ def main():
             "Keywords": ",".join(features),
         })
         done[item_id] = day.isoformat()
+        done["title:" + title] = day.isoformat()
         print(f"  {item_id} → {board} / {day} {hour}時")
 
     with open(OUTPUT_CSV, "w", encoding="utf-8", newline="") as f:
