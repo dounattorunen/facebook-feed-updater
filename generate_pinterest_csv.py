@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import os
+import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -52,6 +53,24 @@ def fit_font(draw, text, path, size, min_size, max_w):
     return text, f
 
 
+# 画像の見出しから外すもの：(カラー名…) や［］などの括弧書き
+PAREN_PATTERN = re.compile(r"\s*[（(\[［〔][^）)\]］〕]*[）)\]］〕]?")
+
+
+def clean_headline(text):
+    return re.sub(r"\s{2,}", " ", PAREN_PATTERN.sub("", text)).strip()
+
+
+def split_two_lines(text):
+    """スペースの位置で、なるべく真ん中に近いところで2行に分ける"""
+    spaces = [i for i, c in enumerate(text) if c in " 　"]
+    if not spaces:
+        mid = len(text) // 2
+        return text[:mid], text[mid:]
+    i = min(spaces, key=lambda x: abs(x - len(text) / 2))
+    return text[:i].strip(), text[i + 1:].strip()
+
+
 def draw_center(draw, y, text, f, fill):
     w = draw.textlength(text, font=f)
     draw.text(((W - w) / 2, y), text, font=f, fill=fill)
@@ -68,11 +87,21 @@ def make_image(src_url, headline, subline, footer, out_path):
     im = Image.new("RGB", (W, H), BG)
     im.paste(src, (0, BAND))
     d = ImageDraw.Draw(im)
-    t, f = fit_font(d, headline, FONT_BOLD, 52, 38, W - 100)
-    draw_center(d, 70, t, f, INK)
+    max_w = W - 100
+    one_line_ok = d.textlength(headline, font=font(FONT_BOLD, 42)) <= max_w
+    if one_line_ok:
+        t, f = fit_font(d, headline, FONT_BOLD, 52, 42, max_w)
+        draw_center(d, 70, t, f, INK)
+        sub_y = 155
+    else:
+        # 1行に収まらない長い商品名は2行にする
+        for line, y in zip(split_two_lines(headline), (35, 95)):
+            t, f = fit_font(d, line, FONT_BOLD, 44, 34, max_w)
+            draw_center(d, y, t, f, INK)
+        sub_y = 170
     if subline:
-        t, f = fit_font(d, subline, FONT_REG, 36, 28, W - 100)
-        draw_center(d, 155, t, f, SUB)
+        t, f = fit_font(d, subline, FONT_REG, 34 if not one_line_ok else 36, 28, max_w)
+        draw_center(d, sub_y, t, f, SUB)
     t, f = fit_font(d, footer, FONT_REG, 34, 26, W - 100)
     draw_center(d, BAND + W + 80, t, f, SUB)
     im.save(out_path, "JPEG", quality=88)
@@ -105,7 +134,8 @@ def main():
         if slug == "other":
             continue  # 靴以外はボードが決まっていないので対象外
 
-        headline = ("洗える" + name) if ("洗える" in features and "洗える" not in name) else name
+        headline = clean_headline(name)
+        headline = ("洗える" + headline) if ("洗える" in features and "洗える" not in headline) else headline
         subline = "・".join([x for x in features if x != "洗える"][:3])
         footer = f"{brand} ｜ {SHOP_NAME}" if brand else SHOP_NAME
         img_name = f"{item_id}.jpg"
