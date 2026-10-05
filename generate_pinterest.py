@@ -19,6 +19,7 @@ SHOP_TITLE = "BATH ONLINE SHOP"
 SHOP_LINK = "https://www.bath-ec.com"
 
 NEW_ONLY_DAYS = 14        # 初登場からこの日数以内の商品だけをフィードに載せる
+FALLBACK_ITEMS = 1        # 新作が無いカテゴリにも最低この件数を載せる（空フィードはPinterestがエラーにするため）
 TITLE_MAX = 100           # Pinterestのタイトル上限
 DESC_MAX = 500            # Pinterestの説明文上限
 PREFERRED_IMAGE = 1       # 1=メイン画像, 2=追加画像1枚目(-m-02), 3=-m-03 …（着用画像の番号に合わせて変更）
@@ -174,6 +175,7 @@ def main():
 
     cutoff = (date.today() - timedelta(days=NEW_ONLY_DAYS)).isoformat()
     feeds = {}   # slug -> (board, [items])
+    fallback = {}  # slug -> [(初登場日, item)]  新作が無いカテゴリ用の候補
     all_items = []
 
     for row in rows:
@@ -186,9 +188,6 @@ def main():
         availability = row.get("availability", "").strip().lower()
         if availability in ("out of stock", "在庫切れ"):
             continue
-        if state[item_id] < cutoff:
-            continue  # 新作期間を過ぎた商品は載せない
-
         features, name, brand = split_title(row.get("title", ""))
         slug, board = detect_category(name)
         first_seen = datetime.fromisoformat(state[item_id]).replace(hour=9, tzinfo=timezone.utc)
@@ -201,6 +200,10 @@ def main():
             "image": pick_image(row),
             "pub_date": format_datetime(first_seen),  # 毎回変わらないよう初登場日で固定
         }
+        if state[item_id] < cutoff:
+            # 新作期間を過ぎた商品は、カテゴリが空になったときの予備としてだけ保持
+            fallback.setdefault(slug, []).append((state[item_id], item))
+            continue
         feeds.setdefault(slug, (board, []))[1].append(item)
         all_items.append(item)
 
@@ -210,6 +213,10 @@ def main():
     boards[OTHER_CATEGORY[0]] = OTHER_CATEGORY[1]
     for slug in sorted(slugs):
         board, items = feeds.get(slug, (boards[slug], []))
+        if not items and fallback.get(slug):
+            # 初登場日が新しい順（同日ならフィードの並び順）で予備を載せる
+            cands = sorted(fallback[slug], key=lambda x: x[0], reverse=True)
+            items = [it for _, it in cands[:FALLBACK_ITEMS]]
         write_rss(os.path.join(OUTPUT_DIR, f"pinterest_{slug}.xml"), f"{SHOP_TITLE} {board}", items)
         print(f"  {slug:<11} → {board}: {len(items)}件")
 
