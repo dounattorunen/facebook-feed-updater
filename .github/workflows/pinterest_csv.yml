@@ -1,0 +1,47 @@
+name: Pinterest Bulk CSV
+
+on:
+  workflow_dispatch: # 月1回など、必要なときに手動で実行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Japanese font and Pillow
+        run: |
+          sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+          pip install Pillow
+
+      # facebook_feed.csv（毎朝の自動実行で更新済み）から縦長画像とCSVを作成
+      - name: Generate images and CSV
+        run: python generate_pinterest_csv.py
+
+      # 画像をfutureshopのFTPへ転送（pinterest/img/ フォルダ）
+      - name: Upload images via cURL
+        run: |
+          shopt -s nullglob
+          for f in pin_images/*.jpg; do
+            name=$(basename "$f")
+            echo "Uploading $name"
+            curl -sS --fail --ftp-create-dirs -T "$f" "ftp://${{ secrets.FTP_SERVER }}/public_html/pinterest/img/$name" --user "${{ secrets.FTP_USERNAME }}:${{ secrets.FTP_PASSWORD }}"
+          done
+
+      # CSVと記録ファイルをリポジトリに保存（CSVはここからダウンロード）
+      - name: Commit and push
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add pinterest_bulk.csv pinterest_csv_done.json
+          git diff --staged --quiet || git commit -m "Pinterest bulk CSV: $(date +'%Y-%m-%d')"
+          git push
