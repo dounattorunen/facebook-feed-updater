@@ -7,6 +7,9 @@ import time
 import ssl
 import concurrent.futures
 import glob
+import unicodedata
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # ==========================================
 # 1. 基本設定
@@ -183,11 +186,64 @@ ITEM_NO_PATTERN = re.compile(
 BRAND_PAIR_PATTERN = re.compile(r"(COULEUR\s*VARIE|BATH\s*CRAFT)\s*[\(（]\s*(クロールバリエ|バスクラフト)\s*[\)）]", re.IGNORECASE)
 EMPTY_BRACKET_PATTERN = re.compile(r"\(\s*\)|（\s*）|〈\s*〉|「\s*」|【\s*】|\[\s*\]")
 
+# ==========================================
+# 新作表記の自動切り替え ＆ 不要な定型文の削除
+# ==========================================
+# Y春夏新作 : 〜Y年8月はそのまま / Y年9月〜Y+1年3月は「Y新作」 / Y+1年4月〜は削除
+# Y秋冬新作 : 〜Y+1年3月はそのまま / Y+1年4月〜は削除
+# Y新作     : 〜Y+1年3月はそのまま / Y+1年4月〜は削除
+# 日付は実行日（日本時間）で判定。毎年自動で適用される。
+TODAY = datetime.now(ZoneInfo("Asia/Tokyo")).date()
+
+SEASON_LABEL_PATTERN = re.compile(
+    r"([0-9０-９]{4})\s*年?\s*(春夏|秋冬|SS|ＳＳ|S/S|AW|ＡＷ|A/W|FW)?\s*新作", re.IGNORECASE)
+SPRING_SUMMER = ("春夏", "SS", "ＳＳ", "S/S")
+_REMOVED = "\x00"
+SEP = r"[・、,，/／]"
+
+REMOVE_PHRASE_PATTERNS = [
+    # ※予約商品と通常発送商品を一緒にご注文の場合は、予約商品が入荷後に同時発送となります
+    re.compile(r"※?\s*予約商品と通常発送商品を一緒にご注文の場合は、?\s*予約商品が?\s*入荷後に?\s*同時発送となります。?"),
+]
+
+def _season_replace(m, today):
+    year = int(unicodedata.normalize("NFKC", m.group(1)))
+    season = (m.group(2) or "").upper()
+    expire = (year + 1, 4)                     # Y+1年4月から削除
+    now = (today.year, today.month)
+    if now >= expire:
+        return _REMOVED
+    if season in SPRING_SUMMER and now >= (year, 9):
+        return f"{year}新作"                   # Y年9月から「Y新作」
+    return m.group(0)
+
+def apply_label_rules(text, today=None):
+    """新作表記の切り替えと、不要な定型文の削除（タイトル・説明文共通）"""
+    if not text:
+        return text
+    for pat in REMOVE_PHRASE_PATTERNS:
+        text = pat.sub("", text)
+    today = today or TODAY
+    text = SEASON_LABEL_PATTERN.sub(lambda m: _season_replace(m, today), text)
+    if _REMOVED in text:
+        # 削除した表記の後ろの「の」や区切り記号もいっしょに消す（例: 2024SS新作のサンダル → サンダル）
+        text = re.sub(_REMOVED + r"の?\s*" + SEP + r"?\s*", "", text)
+        text = text.replace(_REMOVED, "")
+        # 【新色・】【・新色】のように残った区切り記号を掃除
+        text = re.sub(SEP + r"\s*(?=[】\]）\)])", "", text)
+        text = re.sub(r"(?<=[【\[（\(])\s*" + SEP, "", text)
+        text = EMPTY_BRACKET_PATTERN.sub(" ", text)
+        text = MULTI_SPACE_PATTERN.sub(" ", text).strip()
+    return text
+
 def format_title(original_title, item_id=""):
     title = original_title
     
     # ★追加：一番最初に「※返品・交換不可※」などのネガティブワードをすべて削除
     title = NEGATIVE_WORD_PATTERN.sub("", title)
+
+    # 新作表記の切り替え・不要な定型文の削除
+    title = apply_label_rules(title)
     
     # 不要な記号を削除
     title = ITEM_NO_PATTERN.sub("", title)
@@ -270,6 +326,7 @@ def process_row(row, timestamp):
 
     cleaned = clean_text(raw_desc)
     cleaned = re.sub(r"^カラーバリエーション\s*", "", cleaned)
+    cleaned = apply_label_rules(cleaned)
     row["description"] = cleaned
 
     # 【0-2】タイトル：goods CSVの商品名を優先。専用の軽いクリーニングを使う（clean_textは使わない）
