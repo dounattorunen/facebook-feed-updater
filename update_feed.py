@@ -55,52 +55,6 @@ def clean_text(text):
         
     return text.strip()
 
-def load_feature_dict():
-    feature_dict = {}
-    goods_files = glob.glob("goods_*.csv")
-    if not goods_files:
-        print("※ goods_*.csv が見つかりません。タイトルからの特徴抽出のみ行います。")
-        return feature_dict
-    
-    latest_goods_file = sorted(goods_files)[-1]
-    print(f"商品データ {latest_goods_file} を読み込み、特徴辞書を作成します...")
-    
-    try:
-        with open(latest_goods_file, "r", encoding="cp932", errors="replace") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                item_id = str(row.get("商品番号", "")).strip()
-                keywords_str = row.get("キーワード", "")
-                if item_id and keywords_str:
-                    keywords = [k.strip() for k in keywords_str.split(",")]
-                    matched = [k for k in keywords if k in FEATURE_KEYWORDS]
-                    if matched:
-                        feature_dict[item_id] = list(dict.fromkeys(matched))
-    except Exception as e:
-        print(f"CSVの読み込みエラー: {e}")
-        
-    print(f"{len(feature_dict)}件の商品に特徴データを紐付けました。")
-    return feature_dict
-def load_title_dict():
-    """goods_*.csv の「商品名」を商品番号ベースで辞書化（futureshop自動フィードのtitleは
-    40文字強でカットされてしまうため、こちらを優先する）"""
-    title_dict = {}
-    goods_files = glob.glob("goods_*.csv")
-    if not goods_files:
-        return title_dict
-    latest_goods_file = sorted(goods_files)[-1]
-    try:
-        with open(latest_goods_file, "r", encoding="cp932", errors="replace") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                item_id = str(row.get("商品番号", "")).strip()
-                name = row.get("商品名", "").strip()
-                if item_id and name:
-                    title_dict[item_id] = name
-    except Exception as e:
-        print(f"商品名の読み込みエラー: {e}")
-    print(f"{len(title_dict)}件の商品に管理画面の商品名を紐付けました。")
-    return title_dict
 def strip_html_to_text(html_text):
     """管理画面の商品説明文HTMLをプレーンテキストに変換"""
     if not html_text:
@@ -111,30 +65,104 @@ def strip_html_to_text(html_text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
-def load_description_dict():
-    """goods_*.csv の「商品説明文」を商品番号ベースで辞書化"""
-    desc_dict = {}
+# ==========================================
+# goods_*.csv（管理画面の商品データ一括ダウンロード）の読み込み
+# ==========================================
+# このスクリプトが goods CSV から使う列。管理画面「商品データ一括登録項目設定」で
+# 以下がOFFにされると、説明文・タイトルが黙って劣化するため、欠けていたら停止する。
+#   商品番号 / 商品名 / メイングループ … 固定項目（常に出力される）
+#   商品説明文       … 「商品説明HTMLタグ」にチェック
+#   キーワード       … 「キーワード」にチェック
+GOODS_REQUIRED_COLUMNS = ["商品番号", "商品名", "メイングループ", "商品説明文", "キーワード"]
+GOODS_MIN_ROWS = 100  # これより少なければダウンロード範囲の誤りとみなす
+
+def load_goods():
+    """goods_*.csv を1回だけ読み、説明文・特徴・商品名の辞書を返す"""
+    desc_dict, feature_dict, title_dict, group_dict = {}, {}, {}, {}
     goods_files = glob.glob("goods_*.csv")
     if not goods_files:
-        return desc_dict
-    latest_goods_file = sorted(goods_files)[-1]
-    try:
-        with open(latest_goods_file, "r", encoding="cp932", errors="replace") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                item_id = str(row.get("商品番号", "")).strip()
-                raw_html = row.get("商品説明文", "")
-                if item_id and raw_html:
-                    desc_dict[item_id] = strip_html_to_text(raw_html)
-    except Exception as e:
-        print(f"商品説明文の読み込みエラー: {e}")
-    print(f"{len(desc_dict)}件の商品に管理画面の説明文を紐付けました。")
-    return desc_dict
+        print("※ goods_*.csv が見つかりません。フィードの値のみで処理します。")
+        return desc_dict, feature_dict, title_dict, group_dict
 
-ITEM_DESCRIPTIONS = load_description_dict()
-# 起動時に一度だけ特徴辞書を作成
-ITEM_FEATURES = load_feature_dict()
-ITEM_TITLES = load_title_dict()
+    latest_goods_file = sorted(goods_files)[-1]
+    print(f"商品データ {latest_goods_file} を読み込みます...")
+
+    with open(latest_goods_file, "r", encoding="cp932", errors="replace") as f:
+        reader = csv.DictReader(f)
+        header = reader.fieldnames or []
+        missing = [c for c in GOODS_REQUIRED_COLUMNS if c not in header]
+        if missing:
+            raise SystemExit(
+                f"\n[エラー] {latest_goods_file} に必要な列がありません: {missing}\n"
+                "futureshop管理画面「商品データ一括登録項目設定」で該当項目にチェックを入れ、"
+                "CSVをダウンロードし直してください。\n"
+                f"必要な列: {GOODS_REQUIRED_COLUMNS}"
+            )
+        rows = list(reader)
+
+    if len(rows) < GOODS_MIN_ROWS:
+        raise SystemExit(
+            f"\n[エラー] {latest_goods_file} の行数が {len(rows)} 件しかありません"
+            f"（想定 {GOODS_MIN_ROWS} 件以上）。全商品を対象にダウンロードし直してください。"
+        )
+
+    for row in rows:
+        item_id = str(row.get("商品番号", "")).strip()
+        if not item_id:
+            continue
+        raw_html = row.get("商品説明文", "")
+        if raw_html:
+            desc_dict[item_id] = strip_html_to_text(raw_html)
+        name = row.get("商品名", "").strip()
+        if name:
+            title_dict[item_id] = name
+        group_dict[item_id] = row.get("メイングループ", "").strip()
+        keywords_str = row.get("キーワード", "")
+        if keywords_str:
+            keywords = [k.strip() for k in keywords_str.split(",")]
+            matched = [k for k in keywords if k in FEATURE_KEYWORDS]
+            if matched:
+                feature_dict[item_id] = list(dict.fromkeys(matched))
+
+    print(f"{len(rows)}行を読み込みました（説明文 {len(desc_dict)}件 / 商品名 {len(title_dict)}件 / 特徴 {len(feature_dict)}件）")
+    return desc_dict, feature_dict, title_dict, group_dict
+
+# 起動時に一度だけ読み込み
+ITEM_DESCRIPTIONS, ITEM_FEATURES, ITEM_TITLES, ITEM_GROUPS = load_goods()
+
+# ==========================================
+# 洗えないブランドのチェック
+# ==========================================
+# newmo / BATH CRAFT / BATH ROOM は洗えないため、「洗える」系の表現を載せない。
+# ブランドは goods CSV のメイングループで判定（フィードのbrand列は全商品COULEUR VARIEのため使えない）。
+# goods CSVに無い商品は商品名の文字列で判定する。
+NON_WASHABLE_GROUP_PREFIXES = ("newmo", "BATH CRAFT", "BATH ROOM")
+NON_WASHABLE_NAME_PATTERN = re.compile(r"newmo|ニューモ|BATH\s*CRAFT|バスクラフト|BATH\s*ROOM|バスルーム", re.IGNORECASE)
+# 商品そのものが洗えると読める表現（「洗練」は対象外）
+WASHABLE_CLAIM_PATTERN = re.compile(r"洗える|洗えて|丸洗い|洗濯機|洗濯可|洗濯OK|洗濯ＯＫ|水洗い|ウォッシャブル|washable", re.IGNORECASE)
+# 問題ない文脈：否定表現、またはインソール・中敷だけ洗える場合
+WASHABLE_OK_PATTERN = re.compile(r"(インソール|中敷)[^。]*$")  # 同じ文の中でインソール・中敷の話をしている
+BODY_WASH_PATTERN = re.compile(r"丸洗い|洗濯機|ウォッシャブル|washable", re.IGNORECASE)  # 靴本体の話なのでインソール文脈でも警告
+WASHABLE_NEGATION_PATTERN = re.compile(r"^[^。、]{0,12}(ません|ない|不可|NG)")
+WASH_WARNINGS = []
+
+def is_non_washable(item_id, title=""):
+    group = ITEM_GROUPS.get(item_id, "")
+    if group:
+        return group.startswith(NON_WASHABLE_GROUP_PREFIXES)
+    return bool(NON_WASHABLE_NAME_PATTERN.search(title or ""))
+
+def find_washable_claims(text):
+    """洗えると読める箇所の前後を返す（インソール限定・否定表現は除外）"""
+    hits = []
+    for m in WASHABLE_CLAIM_PATTERN.finditer(text or ""):
+        before = text[max(0, m.start() - 80):m.start()]
+        after = text[m.end():m.end() + 20]
+        insole_only = WASHABLE_OK_PATTERN.search(before) and not BODY_WASH_PATTERN.search(m.group())
+        if insole_only or WASHABLE_NEGATION_PATTERN.search(after):
+            continue
+        hits.append(text[max(0, m.start() - 15):m.end() + 15])
+    return hits[:1]  # 同じ商品・同じ欄は1件に集約
 # titleのクリーニングはHTML除去のみ。description用のNo.カット処理は使わない
 def clean_title_text(text):
     if not text:
@@ -152,6 +180,9 @@ ITEM_NO_PATTERN = re.compile(
     r"(№|No[\.,、]?|品番)\s*[0-9A-Za-z\-]+(?:\s*[/／]\s*[0-9A-Za-z\-]+)*\s*",
     re.IGNORECASE
 )
+BRAND_PAIR_PATTERN = re.compile(r"(COULEUR\s*VARIE|BATH\s*CRAFT)\s*[\(（]\s*(クロールバリエ|バスクラフト)\s*[\)）]", re.IGNORECASE)
+EMPTY_BRACKET_PATTERN = re.compile(r"\(\s*\)|（\s*）|〈\s*〉|「\s*」|【\s*】|\[\s*\]")
+
 def format_title(original_title, item_id=""):
     title = original_title
     
@@ -178,6 +209,9 @@ def format_title(original_title, item_id=""):
                 found_features.append(kw)
             title = title.replace(kw, "")
             
+    # 「英字(カタカナ)」併記のブランド名はカタカナだけにする（末尾にカタカナのブランド名が付くため、英字は不要）
+    title = BRAND_PAIR_PATTERN.sub(r" \2 ", title)
+
     # ブランド名を抽出して削除
     found_brand = ""
     for brand in BRAND_NAMES:
@@ -185,11 +219,18 @@ def format_title(original_title, item_id=""):
             found_brand = brand
             title = title.replace(brand, "")
             break
-            
+
+    # ブランド名を抜いた後に残る空のカッコを削除（例: COULEUR VARIE(クロールバリエ) → COULEUR VARIE()）
+    title = EMPTY_BRACKET_PATTERN.sub(" ", title)
+
     title = MULTI_SPACE_PATTERN.sub(" ", title).strip()
     
     # 並び替え結合
     final_title = ""
+    # 洗えないブランドは「洗える」系の特徴を付けない
+    if is_non_washable(item_id, original_title):
+        found_features = [f for f in found_features if not WASHABLE_CLAIM_PATTERN.search(f)]
+
     if found_features:
         unique_features = list(dict.fromkeys(found_features))
         features_str = "・".join(unique_features)
@@ -263,6 +304,12 @@ def process_row(row, timestamp):
     row["description"] = truncate_field(row["description"], 5000)
     row["title"] = truncate_field(row["title"], 150)
 
+    # 【D】洗えないブランドの最終チェック（説明文は自動で書き換えず、警告のみ）
+    if is_non_washable(item_id, raw_title):
+        for field in ("title", "description"):
+            for snippet in find_washable_claims(row[field]):
+                WASH_WARNINGS.append((item_id, ITEM_GROUPS.get(item_id, "?"), field, snippet))
+
     return row
 # ==========================================
 # 4. メイン処理
@@ -331,6 +378,13 @@ def main():
         writer_chatgpt.writerows(chatgpt_rows)
         
     print(f"ChatGPT用フィードを出力しました: {chatgpt_output_file}")
+    if WASH_WARNINGS:
+        print(f"\n[要確認] 洗えないブランドの商品に「洗える」系の表現が {len(WASH_WARNINGS)} 件あります。futureshop管理画面で修正してください。")
+        for item_id, group, field, snippet in WASH_WARNINGS:
+            print(f"::warning title=洗えないブランド {item_id}::{group} / {field}: …{snippet}…")
+    else:
+        print("洗えないブランドのチェック：問題なし")
+
     print("全処理が完了しました！")
 
 if __name__ == '__main__':
