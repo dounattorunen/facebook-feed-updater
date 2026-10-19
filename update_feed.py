@@ -79,6 +79,8 @@ def strip_html_to_text(html_text):
 GOODS_REQUIRED_COLUMNS = ["商品番号", "商品名", "メイングループ", "商品説明文", "キーワード"]
 GOODS_MIN_ROWS = 100  # これより少なければダウンロード範囲の誤りとみなす
 
+ITEM_LIST_PRICES = {}  # 商品番号 → 定価（load_goods で埋める。ChatGPTフィードの price / sale_price 用）
+
 def load_goods():
     """goods_*.csv を1回だけ読み、説明文・特徴・商品名の辞書を返す"""
     desc_dict, feature_dict, title_dict, group_dict = {}, {}, {}, {}
@@ -120,6 +122,13 @@ def load_goods():
         if name:
             title_dict[item_id] = name
         group_dict[item_id] = row.get("メイングループ", "").strip()
+        # ChatGPT用 sale_price：サイトに定価（取り消し線）を表示している商品だけ定価を控える
+        list_price = str(row.get("定価", "")).strip()
+        if list_price and str(row.get("定価表示方法", "")).strip() == "1":
+            try:
+                ITEM_LIST_PRICES[item_id] = int(float(list_price))
+            except ValueError:
+                pass
         keywords_str = row.get("キーワード", "")
         if keywords_str:
             keywords = [k.strip() for k in keywords_str.split(",")]
@@ -369,6 +378,245 @@ def process_row(row, timestamp):
 
     return row
 # ==========================================
+# 3.5 ChatGPT広告フィード専用の整形
+# ==========================================
+# ChatGPTはタイトルを文章として読むため、Meta用の【特徴羅列】タイトルとは別に
+# 「ブランド 商品名 特徴(最大3つ)」の自然な形に作り直す。Meta用フィードには影響しない。
+# 列名は OpenAI Product Feed Spec に合わせる（https://developers.openai.com/commerce/product-feeds/spec）
+
+# メイングループ → (brand列の値, タイトル先頭に付ける表記)
+CG_BRANDS = [
+    ("COULEURVARIE relaxing", "COULEUR VARIE", "クロールバリエ リラクシング"),
+    ("COULEUR VARIE", "COULEUR VARIE", "クロールバリエ"),
+    ("newmo", "newmo", "newmo"),
+    ("BATH CRAFT", "BATH CRAFT", "バスクラフト"),
+    ("BATH ROOM", "BATH ROOM", "バスルーム"),
+    ("elevage", "elevage", "elevage"),
+]
+# goods CSVに無い商品はタイトルの文字列でブランドを判定
+CG_BRAND_NAME_PATTERNS = [
+    (re.compile(r"newmo|ニューモ", re.I), 1),
+    (re.compile(r"BATH\s*CRAFT|バスクラフト", re.I), 2),
+    (re.compile(r"BATH\s*ROOM|バスルーム", re.I), 3),
+    (re.compile(r"elevage|エルバージュ", re.I), 4),
+]
+# タイトルから消すブランド表記（長いものから）
+CG_BRAND_WORDS = re.compile(
+    r"COULEUR\s*VARIE\s*[\(（]\s*クロールバリエ\s*[\)）]|COULEUR\s*VARIE\s*relaxing|COULEUR\s*VARIE|"
+    r"クロールバリエ\s*リラクシング|クロールバリエ|クロール\s*バリエ|BATH\s*CRAFT|バスクラフト|BATH\s*ROOM|バスルーム|"
+    r"newmo|ニューモ|elevage|エルバージュ", re.I)
+CG_NOTE_PATTERN = re.compile(
+    r"※?\s*(返品・?交換不可|交換・?返品不可|返品対応可|返品可|予約商品と通常発送商品を一緒にご注文の場合は[^※【]*?同時発送となります。?)\s*※?"
+    r"|※[^※【\(（]{0,30}$")  # ※返品・交換不可※ / ※返品対応可 / ※予約商品と… / 末尾の※注記
+CG_SALE_PATTERN = re.compile(r"[●/／]?\s*セール\s*●?|在庫販売")
+CG_VARIANT_CODE = re.compile(r"\bM\d+\.")                                # BATH CRAFT の「M2.」などの色コード
+CG_MENS_PATTERN = re.compile(r"[/／]?\s*(メンズ|紳士|男性)\s*[/／]?")
+CG_PAREN_PATTERN = re.compile(r"[\(（]([^\(\)（）]*)[\)）]")
+CG_PROMO_TOKENS = re.compile(r"新作|新色|定番人気|人気商品|セール|在庫販売|再入荷|予約|限定|シリーズ")
+CG_BRACKET_PATTERN = re.compile(r"【([^】]*)】")
+
+# 特徴の表記ゆれをそろえ、優先度の高い順に最大3つ載せる
+CG_FEATURE_ALIASES = {"軽い": "軽量", "撥水": "はっ水", "幅調整": "幅調整可能"}
+CG_FEATURE_ORDER = ["幅広3E", "幅広2E", "幅広", "3E", "2E", "甲高", "幅調整可能", "日本製", "防水", "はっ水", "軽量",
+                    "歩きやすい", "痛くない", "柔らかい", "ムレない", "洗える"]
+CG_FEATURE_SCAN = FEATURE_KEYWORDS + ["2E", "幅調整", "はっ水"]
+CG_MAX_FEATURES = 3
+
+# 商品名 → product_category（上から順に最初に当たったもの）
+CG_CATEGORIES = [
+    (r"ルームシューズ", "靴 > ルームシューズ"),
+    (r"ブーツ|ブーティ", "靴 > ブーツ"),
+    (r"サンダル|ミュール|サボ", "靴 > サンダル"),
+    (r"スニーカー", "靴 > スニーカー"),
+    (r"ローファー|モカシン|ドライビング", "靴 > ローファー・モカシン"),
+    (r"バレエ|オペラ", "靴 > バレエシューズ"),
+    (r"パンプス", "靴 > パンプス"),
+    (r"スリッポン|シューズ|シューティ", "靴 > フラットシューズ"),
+    (r"傘|umbrella|parasol", "ファッション小物 > 傘"),
+    (r"リュック", "バッグ > リュック"),
+    (r"サコッシュ|ポシェット|ショルダー", "バッグ > ショルダーバッグ"),
+    (r"バッグ|バック(?!ル|ベルト)", "バッグ"),
+]
+# 靴以外（バッグ・傘）には付けない特徴
+CG_SHOE_ONLY_FEATURES = {"幅広3E", "幅広2E", "幅広", "3E", "2E", "甲高", "幅調整可能", "歩きやすい", "痛くない", "ムレない"}
+CG_CATEGORIES = [(re.compile(p, re.I), c) for p, c in CG_CATEGORIES]
+
+
+def cg_brand(item_id, raw_title):
+    group = ITEM_GROUPS.get(item_id, "")
+    for prefix, brand, label in CG_BRANDS:
+        if group.startswith(prefix):
+            return brand, label
+    for pat, idx in CG_BRAND_NAME_PATTERNS:
+        if pat.search(raw_title or ""):
+            return CG_BRANDS[idx][1], CG_BRANDS[idx][2]
+    return CG_BRANDS[1][1], CG_BRANDS[1][2]
+
+
+def cg_features(text):
+    found = [kw for kw in CG_FEATURE_SCAN if kw in text]
+    return found
+
+
+def cg_normalize_features(features, non_washable, is_shoe=True):
+    feats = []
+    for f in features:
+        f = CG_FEATURE_ALIASES.get(f.strip(), f.strip())
+        if not f or f in feats:
+            continue
+        if non_washable and WASHABLE_CLAIM_PATTERN.search(f):
+            continue
+        feats.append(f)
+    if "3E" in feats:
+        feats = [x for x in feats if x not in ("幅広", "3E", "2E")] + ["幅広3E"]
+    elif "幅広" in feats and "2E" in feats:
+        feats = [x for x in feats if x not in ("幅広", "2E")] + ["幅広2E"]
+    if not is_shoe:
+        feats = [x for x in feats if x not in CG_SHOE_ONLY_FEATURES]
+    known = [f for f in CG_FEATURE_ORDER if f in feats]
+    return known[:CG_MAX_FEATURES]
+
+
+def cg_title(item_id, raw_title):
+    """ChatGPT用タイトル：ブランド 商品名 特徴・特徴・特徴"""
+    brand, brand_label = cg_brand(item_id, raw_title)
+    non_washable = is_non_washable(item_id, raw_title)
+    t = unicodedata.normalize("NFKC", html.unescape(clean_title_text(raw_title)))
+
+    t = CG_NOTE_PATTERN.sub(" ", t)
+    t = NEGATIVE_WORD_PATTERN.sub(" ", t)
+    t = apply_label_rules(t)
+
+    features = list(ITEM_FEATURES.get(item_id, []))
+    # 【】の中身：販促語は捨て、特徴はfeaturesへ、それ以外（フリルタイプ等）は商品名に残す
+    keep_words = []
+    for inner in CG_BRACKET_PATTERN.findall(t):
+        for tok in re.split(r"[・,、/]", inner):
+            tok = tok.strip()
+            if not tok or CG_PROMO_TOKENS.search(tok):
+                continue
+            if tok in CG_FEATURE_SCAN or tok in CG_FEATURE_ALIASES:
+                features.append(tok)
+            else:
+                keep_words.append(tok)
+    t = CG_BRACKET_PATTERN.sub(" ", t)
+
+    # （）の中身：検索キーワードの羅列や販促は捨てる（特徴だけ拾う）。短い補足（チュール等）は残す
+    def _paren(m):
+        inner = m.group(1).strip()
+        features.extend(cg_features(inner))
+        tokens = [x for x in re.split(r"[\s,、・/]+", inner) if x]
+        if len(tokens) >= 3 or CG_PROMO_TOKENS.search(inner) or "店舗" in inner or not inner:
+            return " "
+        return f"({inner})"
+    t = CG_PAREN_PATTERN.sub(_paren, t)
+    # 閉じカッコの無いキーワード羅列（商品名が途中で切れている）も同様に捨てる
+    m_open = re.search(r"[\(（]([^\)）]*)$", t)
+    if m_open:
+        features.extend(cg_features(m_open.group(1)))
+        t = t[:m_open.start()]
+
+    mens = bool(CG_MENS_PATTERN.search(t))
+    t = CG_MENS_PATTERN.sub(" ", t)
+    t = CG_SALE_PATTERN.sub(" ", t)
+    t = CG_VARIANT_CODE.sub(" ", t)
+    t = BRAND_PAIR_PATTERN.sub(" ", t)
+
+    # 品番より前にキャッチコピーがある場合（「…が登場No.374282 …」）は品番より後ろを商品名とする
+    m = ITEM_NO_PATTERN.search(t)
+    if m and m.start() > 0 and len(t[m.end():].strip()) >= 6:
+        t = t[m.end():]
+    t = ITEM_NO_PATTERN.sub(" ", t)
+    t = PROMO_SYMBOL_PATTERN.sub(" ", t)
+    t = CG_BRAND_WORDS.sub(" ", t)
+    t = re.sub(r"×\s*ことりっぷ", " ことりっぷコラボ ", t)
+    t = re.sub(r"^[\s/／・,、]+|[\s/／・,、]+$", "", t)
+    t = EMPTY_BRACKET_PATTERN.sub(" ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # 商品名に既に含まれる特徴は重ねない
+    features.extend(cg_features(raw_title))
+    is_shoe = cg_category(t).startswith("靴")
+    feats = [f for f in cg_normalize_features(features, non_washable, is_shoe) if f not in t]
+
+    # 認知度より商品の中身で選ばれるため「商品名 特徴 ブランド」の順（ブランドはbrand列でも伝わる）
+    parts = []
+    if mens:
+        parts.append("メンズ")
+    parts.append(t)
+    parts.extend(keep_words)
+    title = " ".join(p for p in parts if p)
+    if feats:
+        title += " " + "・".join(feats)
+    title += f" {brand_label}"
+    return truncate_field(re.sub(r"\s+", " ", title).strip(), 150), brand, mens
+
+
+def cg_description(desc):
+    """先頭の「No.品番」を外し、商品の説明から始まるようにする"""
+    d = unicodedata.normalize("NFKC", desc or "")
+    d = re.sub(r"^\s*" + ITEM_NO_PATTERN.pattern, "", d, flags=re.I)
+    d = CG_NOTE_PATTERN.sub(" ", d) if d.startswith("※") else d
+    return truncate_field(re.sub(r"\s+", " ", d).strip(), 5000)
+
+
+def cg_category(title):
+    for pat, cat in CG_CATEGORIES:
+        if pat.search(title):
+            return cat
+    return ""
+
+
+CHATGPT_FIELDNAMES = [
+    "item_id", "title", "description", "url", "brand", "seller_name", "image_url", "additional_image_urls",
+    "availability", "price", "sale_price", "condition", "product_category", "gender", "age_group", "gtin", "mpn",
+]
+
+
+def build_chatgpt_row(row):
+    """process_row 後の行（Meta用の列名）から ChatGPT用の行を作る"""
+    item_id = row.get("id", "")
+    raw_title = ITEM_TITLES.get(item_id) or row.get("title", "")
+    title, brand, mens = cg_title(item_id, raw_title)
+
+    # 価格：サイトで定価を見せている商品は price=定価 / sale_price=販売価格
+    price = row.get("price", "")
+    sale_price = ""
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*([A-Z]{3})", price or "")
+    if m:
+        current, currency = float(m.group(1)), m.group(2)
+        list_price = ITEM_LIST_PRICES.get(item_id)
+        if list_price and list_price > current:
+            price = f"{list_price} {currency}"
+            sale_price = f"{int(current)} {currency}"
+
+    out = {
+        "item_id": item_id,
+        "title": title,
+        "description": cg_description(row.get("description", "")),
+        "url": row.get("link", ""),
+        "brand": brand,
+        "seller_name": STORE_NAME,
+        "image_url": row.get("image_link", ""),
+        "additional_image_urls": row.get("additional_image_link", ""),
+        "availability": str(row.get("availability", "")).strip().replace(" ", "_"),
+        "price": price,
+        "sale_price": sale_price,
+        "condition": row.get("condition", "") or "new",
+        "product_category": cg_category(title),
+        "gender": "male" if mens else "female",
+        "age_group": "adult",
+        "gtin": row.get("gtin", ""),
+        "mpn": row.get("mpn", ""),
+    }
+
+    # 洗えないブランドの最終チェック（ChatGPT用タイトルも対象）
+    if is_non_washable(item_id, raw_title):
+        for snippet in find_washable_claims(out["title"]):
+            WASH_WARNINGS.append((item_id, ITEM_GROUPS.get(item_id, "?"), "chatgpt_title", snippet))
+    return out
+
+# ==========================================
 # 4. メイン処理
 # ==========================================
 def main():
@@ -401,36 +649,11 @@ def main():
     print(f"Facebook用フィードを出力しました: {output_file}")
     
     # ChatGPT用フィードの保存
-    chatgpt_fieldnames = []
-    for f in fieldnames:
-        if f == "id": chatgpt_fieldnames.append("item_id")
-        elif f == "link": chatgpt_fieldnames.append("url")
-        elif f == "image_link": chatgpt_fieldnames.append("image_url")
-        else: chatgpt_fieldnames.append(f)
-        
-    if "seller_name" not in chatgpt_fieldnames:
-        chatgpt_fieldnames.append("seller_name")
-        
-    chatgpt_rows = []
-    for row in processed_rows:
-        new_row = {}
-        for k, v in row.items():
-            if k == "id": 
-                new_row["item_id"] = v
-            elif k == "link": 
-                new_row["url"] = v
-            elif k == "image_link": 
-                new_row["image_url"] = v
-            elif k == "availability":
-                new_row["availability"] = str(v).replace(" ", "_")
-            else:
-                new_row[k] = v
-                
-        new_row["seller_name"] = STORE_NAME
-        chatgpt_rows.append(new_row)
-        
+    # （ChatGPT専用のタイトル・ブランド・価格・説明文に作り直す。Meta用の行は変更しない）
+    chatgpt_rows = [build_chatgpt_row(row) for row in processed_rows]
+
     with open(chatgpt_output_file, "w", encoding="utf-8", newline="") as outfile_chatgpt:
-        writer_chatgpt = csv.DictWriter(outfile_chatgpt, fieldnames=chatgpt_fieldnames)
+        writer_chatgpt = csv.DictWriter(outfile_chatgpt, fieldnames=CHATGPT_FIELDNAMES)
         writer_chatgpt.writeheader()
         writer_chatgpt.writerows(chatgpt_rows)
         
