@@ -617,6 +617,55 @@ def build_chatgpt_row(row):
     return out
 
 # ==========================================
+# 3.6 Meta用フィードの仕上げ
+# ==========================================
+# タイトルの形（【特徴】 商品名 ブランド）は generate_pinterest.py が分解して使うため変えない。
+# 直すのは ①brand ②sale_price ③タイトル本文のノイズ（※注記・キーワード羅列）だけ。
+META_KEYWORD_PAREN = re.compile(r"[\(（]([^\(\)（）]*)[\)）]")
+
+def clean_meta_title(title, has_sale_price):
+    t = CG_NOTE_PATTERN.sub(" ", title)
+
+    def _paren(m):
+        inner = m.group(1).strip()
+        tokens = [x for x in re.split(r"[\s,、・/]+", inner) if x]
+        return " " if (len(tokens) >= 3 or not inner) else m.group(0)
+    t = META_KEYWORD_PAREN.sub(_paren, t)
+    # 閉じカッコの無いキーワード羅列（商品名が途中で切れている）は、末尾のブランド名だけ残して外す
+    m_open = re.search(r"[\(（][^\)）]*$", t)
+    if m_open:
+        tail = t[m_open.start():].rstrip()
+        brand_tail = next((b for b in BRAND_NAMES if tail.endswith(b)), "")
+        t = t[:m_open.start()] + (" " + brand_tail if brand_tail else "")
+    if has_sale_price:
+        # 価格欄で割引が表示されるので、商品名本文の「/セール」「●セール●」は外す（【】内のタグは残す）
+        head, sep, body = t.partition("】") if t.startswith("【") else ("", "", t)
+        body = re.sub(r"[/／]\s*セール|●\s*セール\s*●|セール(?=\s|$)", " ", body)
+        t = head + sep + body
+    t = re.sub(r"\s+", " ", t).strip()
+    return truncate_field(t, 150)
+
+
+def build_meta_row(row):
+    """process_row 後の行から Meta用の行を作る（ChatGPT用の行を作った後に呼ぶ）"""
+    out = dict(row)
+    item_id = row.get("id", "")
+    raw_title = ITEM_TITLES.get(item_id) or row.get("title", "")
+    out["brand"] = cg_brand(item_id, raw_title)[0]
+
+    out["sale_price"] = ""
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*([A-Z]{3})", row.get("price", "") or "")
+    if m:
+        current, currency = float(m.group(1)), m.group(2)
+        list_price = ITEM_LIST_PRICES.get(item_id)
+        if list_price and list_price > current:
+            out["price"] = f"{list_price} {currency}"
+            out["sale_price"] = f"{int(current)} {currency}"
+
+    out["title"] = clean_meta_title(row.get("title", ""), bool(out["sale_price"]))
+    return out
+
+# ==========================================
 # 4. メイン処理
 # ==========================================
 def main():
@@ -640,17 +689,20 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         processed_rows = list(executor.map(lambda r: process_row(r, timestamp), rows))
         
-    # Facebook用フィードの保存
-    with open(output_file, "w", encoding="utf-8", newline="") as outfile:
-        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(processed_rows)
-        
-    print(f"Facebook用フィードを出力しました: {output_file}")
-    
-    # ChatGPT用フィードの保存
-    # （ChatGPT専用のタイトル・ブランド・価格・説明文に作り直す。Meta用の行は変更しない）
+    # ChatGPT用の行を先に作る（Meta用の仕上げで price を書き換える前の値を使うため）
     chatgpt_rows = [build_chatgpt_row(row) for row in processed_rows]
+
+    # Facebook用フィードの保存（brand / sale_price / タイトルのノイズを仕上げる）
+    meta_rows = [build_meta_row(row) for row in processed_rows]
+    meta_fieldnames = fieldnames + [f for f in ("brand", "sale_price") if f not in fieldnames]
+    with open(output_file, "w", encoding="utf-8", newline="") as outfile:
+        writer = csv.DictWriter(outfile, fieldnames=meta_fieldnames)
+        writer.writeheader()
+        writer.writerows(meta_rows)
+
+    print(f"Facebook用フィードを出力しました: {output_file}")
+
+    # ChatGPT用フィードの保存
 
     with open(chatgpt_output_file, "w", encoding="utf-8", newline="") as outfile_chatgpt:
         writer_chatgpt = csv.DictWriter(outfile_chatgpt, fieldnames=CHATGPT_FIELDNAMES)
