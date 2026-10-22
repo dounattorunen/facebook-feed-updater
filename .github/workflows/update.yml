@@ -43,5 +43,8 @@ jobs:
         run: |
           for f in pinterest_*.xml; do
             echo "Uploading $f"
-            curl -sS --fail -T "$f" "ftp://${{ secrets.FTP_SERVER }}/public_html/pinterest/$f" --user "${{ secrets.FTP_USERNAME }}:${{ secrets.FTP_PASSWORD }}"
+            # 一時的なFTP無応答に備え、タイムアウト短め＋最大5回リトライ
+            curl -sS --fail --connect-timeout 30 --max-time 120 \
+              --retry 5 --retry-delay 20 --retry-all-errors \
+              -T "$f" "ftp://${{ secrets.FTP_SERVER }}/public_html/pinterest/$f" --user "${{ secrets.FTP_USERNAME }}:${{ secrets.FTP_PASSWORD }}"
           done
