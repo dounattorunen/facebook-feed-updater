@@ -598,8 +598,10 @@ VARIANT_FETCH_WORKERS = 5          # 自社サイトに負荷をかけないよ�
 VARIANT_TABLE_PATTERN = re.compile(
     r'<table[^>]*class="FS2_additional_image_tableVariation_table"[^>]*>(.*?)</table>', re.S)
 
-# ⑤ ChatGPT経由の訪問・注文を自社の解析（GA4等）で見分けるためのパラメータ
-CHATGPT_URL_PARAMS = "utm_source=chatgpt&utm_medium=paid&utm_campaign=chatgpt_shopping"
+# ⑤ 商品URLに付けるパラメータ（空＝付けない）
+#    ChatGPT広告の流入は広告側で「utm_source=chatgpt / utm_medium=cpc」が自動で付き、GA4で計測できているため付けない。
+#    ここで別の値を付けると広告側の値と重複・衝突し、GA4の集計が分かれてしまう。
+CHATGPT_URL_PARAMS = ""
 
 def add_url_params(url_str, params):
     if not url_str or not params or "utm_source=" in url_str:
