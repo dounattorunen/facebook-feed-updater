@@ -771,12 +771,21 @@ def clean_meta_title(title, has_sale_price):
     return truncate_field(t, 150)
 
 
+# 説明文の先頭の品番（No.10037 / NO.174601 / 品番 12930 など）だけを外す。文中の「（No.99）」などは残す
+META_LEADING_ITEM_NO = re.compile(
+    r"^\s*(?:(?:№|No[\.,、]|NO[\.,、]?|品番|型番)\s*[:：]?\s*)+[0-9][0-9A-Za-z\-]*(?:\s*[/／]\s*[0-9A-Za-z\-]+)*\s*")
+
+def strip_leading_item_no(desc):
+    return META_LEADING_ITEM_NO.sub("", desc or "", count=1).strip()
+
+
 def build_meta_row(row):
     """process_row 後の行から Meta用の行を作る（ChatGPT用の行を作った後に呼ぶ）"""
     out = dict(row)
     item_id = row.get("id", "")
     raw_title = ITEM_TITLES.get(item_id) or row.get("title", "")
     out["brand"] = cg_brand(item_id, raw_title)[0]
+    out["description"] = strip_leading_item_no(row.get("description", ""))
 
     out["sale_price"] = ""
     m = re.match(r"\s*(\d+(?:\.\d+)?)\s*([A-Z]{3})", row.get("price", "") or "")
