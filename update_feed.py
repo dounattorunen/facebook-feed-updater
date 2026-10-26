@@ -612,6 +612,28 @@ VARIANT_FETCH_WORKERS = 5          # 自社サイトに負荷をかけないよ�
 VARIANT_TABLE_PATTERN = re.compile(
     r'<table[^>]*class="FS2_additional_image_tableVariation_table"[^>]*>(.*?)</table>', re.S)
 
+# Facebook(Meta)用フィードの custom_label_0 に在庫の状態を入れる（フィードからは外さない）
+#   在庫少   … 買える色・サイズが META_LOW_STOCK_MAX_BUYABLE 通り以下、または割合が META_LOW_STOCK_RATIO 未満
+#              （2026/10 GA4：この層はFB DPAのキーイベント率が約1/3）
+#   在庫切れ … フィードの availability が out of stock、または買える組み合わせが0
+#   在庫あり … 上記以外 / 不明 … 商品ページを読み取れなかった
+#   代理店は広告マネージャの商品セットで custom_label_0 を条件に配信除外・入札調整ができる
+META_STOCK_LABEL_FIELD = "custom_label_0"
+META_LOW_STOCK_MAX_BUYABLE = 1
+META_LOW_STOCK_RATIO = 0.30
+
+def meta_stock_label(row, stock):
+    if str(row.get("availability", "")).strip().lower().replace("_", " ") == "out of stock":
+        return "在庫切れ"
+    if not stock:
+        return "不明"
+    rows, buyable = stock
+    if buyable == 0:
+        return "在庫切れ"
+    if rows >= VARIANT_MIN_ROWS and (buyable <= META_LOW_STOCK_MAX_BUYABLE or buyable / rows < META_LOW_STOCK_RATIO):
+        return "在庫少"
+    return "在庫あり"
+
 # ⑤ 商品URLに付けるパラメータ（空＝付けない）
 #    ChatGPT広告の流入は広告側で「utm_source=chatgpt / utm_medium=cpc」が自動で付き、GA4で計測できているため付けない。
 #    ここで別の値を付けると広告側の値と重複・衝突し、GA4の集計が分かれてしまう。
@@ -793,35 +815,42 @@ def main():
         processed_rows = list(executor.map(lambda r: process_row(r, timestamp), rows))
         
     # ChatGPT用の行を先に作る（Meta用の仕上げで price を書き換える前の値を使うため）
-    chatgpt_rows, chatgpt_excluded, candidates = [], [], []
-    for row in processed_rows:
-        reason = chatgpt_exclude_reason(row)
-        if reason:
-            chatgpt_excluded.append((row.get("id", ""), reason))
-        else:
-            candidates.append(row)
-
-    # 色・サイズごとの在庫を商品ページから読み取り、極端な商品を外す
-    stocks = [None] * len(candidates)
-    if CHATGPT_EXCLUDE_LOW_VARIANT_STOCK and candidates:
-        print(f"商品ページから色・サイズ別の在庫を確認します（{len(candidates)}商品）...")
-        urls = [str(r.get("link", "")).split("?")[0] for r in candidates]
+    # 色・サイズごとの在庫を商品ページから読み取る（ChatGPT用の除外と Meta用の custom_label で共用）
+    stocks = [None] * len(processed_rows)
+    targets = [i for i, r in enumerate(processed_rows)
+               if str(r.get("availability", "")).strip().lower().replace("_", " ") != "out of stock"]
+    if targets:
+        print(f"商品ページから色・サイズ別の在庫を確認します（{len(targets)}商品）...")
+        urls = [str(processed_rows[i].get("link", "")).split("?")[0] for i in targets]
         with concurrent.futures.ThreadPoolExecutor(max_workers=VARIANT_FETCH_WORKERS) as executor:
-            stocks = list(executor.map(fetch_variant_stock, urls))
-        ok = sum(1 for s_ in stocks if s_)
-        print(f"  在庫表を読み取れた商品: {ok} / {len(candidates)}")
-        if candidates and ok < len(candidates) * 0.5:
-            print("::warning title=在庫の自動判定::商品ページの在庫表を半数以上読み取れませんでした（サイト構成の変更やアクセス制限の可能性）。在庫による除外は読み取れた商品だけに適用しています。")
-    for row, stock in zip(candidates, stocks):
-        reason = low_variant_reason(stock)
+            for i, st in zip(targets, executor.map(fetch_variant_stock, urls)):
+                stocks[i] = st
+        ok = sum(1 for i in targets if stocks[i])
+        print(f"  在庫表を読み取れた商品: {ok} / {len(targets)}")
+        if ok < len(targets) * 0.5:
+            print("::warning title=在庫の自動判定::商品ページの在庫表を半数以上読み取れませんでした（サイト構成の変更やアクセス制限の可能性）。在庫による除外・ラベルは読み取れた商品だけに適用しています。")
+
+    chatgpt_rows, chatgpt_excluded = [], []
+    for row, stock in zip(processed_rows, stocks):
+        reason = chatgpt_exclude_reason(row)
+        if not reason and CHATGPT_EXCLUDE_LOW_VARIANT_STOCK:
+            reason = low_variant_reason(stock)
         if reason:
             chatgpt_excluded.append((row.get("id", ""), reason))
         else:
             chatgpt_rows.append(build_chatgpt_row(row))
 
     # Facebook用フィードの保存（brand / sale_price / タイトルのノイズを仕上げる）
-    meta_rows = [build_meta_row(row) for row in processed_rows]
-    meta_fieldnames = fieldnames + [f for f in ("brand", "sale_price") if f not in fieldnames]
+    meta_rows = []
+    for row, stock in zip(processed_rows, stocks):
+        m_row = build_meta_row(row)
+        m_row[META_STOCK_LABEL_FIELD] = meta_stock_label(row, stock)
+        meta_rows.append(m_row)
+    meta_fieldnames = fieldnames + [f for f in ("brand", "sale_price", META_STOCK_LABEL_FIELD) if f not in fieldnames]
+    label_counts = {}
+    for m_row in meta_rows:
+        label_counts[m_row[META_STOCK_LABEL_FIELD]] = label_counts.get(m_row[META_STOCK_LABEL_FIELD], 0) + 1
+    print(f"Facebook用 {META_STOCK_LABEL_FIELD}（在庫の状態）: {label_counts}")
     with open(output_file, "w", encoding="utf-8", newline="") as outfile:
         writer = csv.DictWriter(outfile, fieldnames=meta_fieldnames)
         writer.writeheader()
