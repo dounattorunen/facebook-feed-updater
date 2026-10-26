@@ -573,6 +573,35 @@ CHATGPT_FIELDNAMES = [
 ]
 
 
+# ==========================================
+# ChatGPT用フィードから外す商品
+# ==========================================
+# ① 在庫切れ（futureshopフィードの availability が out of stock）… 毎日自動で判定。在庫が戻れば自動で復活
+CHATGPT_EXCLUDE_OUT_OF_STOCK = True
+# ② 傘（商品名に 傘 / umbrella / parasol）… CTRが低くCPCが高い、価格が低く採算が合わない（2026/10 広告実績より）
+CHATGPT_EXCLUDE_TITLE_PATTERN = re.compile(r"傘|umbrella|parasol", re.IGNORECASE)
+# ③ 個別に外す商品（商品番号: 理由）… 在庫の色・サイズがほとんど残っていない商品など
+#    在庫が戻ったら、ここから消せば翌朝から再掲載される
+CHATGPT_EXCLUDE_IDS = {
+    "8515": "12色中1色・残り2点のみ（2026/10/26時点）",
+    "178202": "7SKU中1SKU・残り2点のみ（2026/10/26時点）",
+}
+
+def chatgpt_exclude_reason(row):
+    """ChatGPT用フィードから外す理由を返す（外さないなら空文字）"""
+    item_id = str(row.get("id", "")).strip()
+    url_code = str(row.get("link", "")).split("?")[0].rstrip("/").split("/")[-1]
+    for key in (item_id, url_code):
+        if key in CHATGPT_EXCLUDE_IDS:
+            return "個別除外: " + CHATGPT_EXCLUDE_IDS[key]
+    raw_title = ITEM_TITLES.get(item_id) or row.get("title", "")
+    if CHATGPT_EXCLUDE_TITLE_PATTERN.search(raw_title or ""):
+        return "傘"
+    if CHATGPT_EXCLUDE_OUT_OF_STOCK and str(row.get("availability", "")).strip().lower().replace("_", " ") == "out of stock":
+        return "在庫切れ"
+    return ""
+
+
 def build_chatgpt_row(row):
     """process_row 後の行（Meta用の列名）から ChatGPT用の行を作る"""
     item_id = row.get("id", "")
@@ -690,7 +719,13 @@ def main():
         processed_rows = list(executor.map(lambda r: process_row(r, timestamp), rows))
         
     # ChatGPT用の行を先に作る（Meta用の仕上げで price を書き換える前の値を使うため）
-    chatgpt_rows = [build_chatgpt_row(row) for row in processed_rows]
+    chatgpt_rows, chatgpt_excluded = [], []
+    for row in processed_rows:
+        reason = chatgpt_exclude_reason(row)
+        if reason:
+            chatgpt_excluded.append((row.get("id", ""), reason))
+        else:
+            chatgpt_rows.append(build_chatgpt_row(row))
 
     # Facebook用フィードの保存（brand / sale_price / タイトルのノイズを仕上げる）
     meta_rows = [build_meta_row(row) for row in processed_rows]
@@ -709,7 +744,9 @@ def main():
         writer_chatgpt.writeheader()
         writer_chatgpt.writerows(chatgpt_rows)
         
-    print(f"ChatGPT用フィードを出力しました: {chatgpt_output_file}")
+    print(f"ChatGPT用フィードを出力しました: {chatgpt_output_file}（{len(chatgpt_rows)}商品 / 除外 {len(chatgpt_excluded)}商品）")
+    for item_id, reason in chatgpt_excluded:
+        print(f"  - 除外 {item_id}: {reason}")
     if WASH_WARNINGS:
         print(f"\n[要確認] 洗えないブランドの商品に「洗える」系の表現が {len(WASH_WARNINGS)} 件あります。futureshop管理画面で修正してください。")
         for item_id, group, field, snippet in WASH_WARNINGS:
