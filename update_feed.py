@@ -580,12 +580,66 @@ CHATGPT_FIELDNAMES = [
 CHATGPT_EXCLUDE_OUT_OF_STOCK = True
 # ② 傘（商品名に 傘 / umbrella / parasol）… CTRが低くCPCが高い、価格が低く採算が合わない（2026/10 広告実績より）
 CHATGPT_EXCLUDE_TITLE_PATTERN = re.compile(r"傘|umbrella|parasol", re.IGNORECASE)
-# ③ 個別に外す商品（商品番号: 理由）… 在庫の色・サイズがほとんど残っていない商品など
-#    在庫が戻ったら、ここから消せば翌朝から再掲載される
+# ③ 個別に外す商品（商品番号: 理由）… 自動判定では拾えない事情で外したい商品があれば追加
+#    例: "8515": "理由",   消せば翌朝から再掲載される
 CHATGPT_EXCLUDE_IDS = {
-    "8515": "12色中1色・残り2点のみ（2026/10/26時点）",
-    "178202": "7SKU中1SKU・残り2点のみ（2026/10/26時点）",
 }
+# ④ 買える色・サイズがほとんど無い商品 … 毎朝、自社の商品ページ（bath-ec.com）の
+#    バリエーション表を読み、「カートに入れる」が出ている組み合わせを数えて自動判定する。
+#    以下のどちらかに当てはまれば除外（組み合わせが VARIANT_MIN_ROWS 未満の商品は対象外）
+#      ・買える組み合わせが VARIANT_MAX_BUYABLE 以下（例: 35通り中1通り）
+#      ・買える割合が VARIANT_MIN_RATIO 未満
+#    商品ページが取れなかった商品は除外しない（判定不能＝掲載を続ける）。
+CHATGPT_EXCLUDE_LOW_VARIANT_STOCK = True
+VARIANT_MIN_ROWS = 3
+VARIANT_MAX_BUYABLE = 1
+VARIANT_MIN_RATIO = 0.15
+VARIANT_FETCH_WORKERS = 5          # 自社サイトに負荷をかけないよう控えめに
+VARIANT_TABLE_PATTERN = re.compile(
+    r'<table[^>]*class="FS2_additional_image_tableVariation_table"[^>]*>(.*?)</table>', re.S)
+
+# ⑤ ChatGPT経由の訪問・注文を自社の解析（GA4等）で見分けるためのパラメータ
+CHATGPT_URL_PARAMS = "utm_source=chatgpt&utm_medium=paid&utm_campaign=chatgpt_shopping"
+
+def add_url_params(url_str, params):
+    if not url_str or not params or "utm_source=" in url_str:
+        return url_str
+    base, sep, frag = url_str.partition("#")
+    joiner = "&" if "?" in base else "?"
+    return f"{base}{joiner}{params}" + (sep + frag if sep else "")
+
+def parse_variant_stock(page_html):
+    """商品ページのHTMLから (組み合わせ数, 買える組み合わせ数) を返す。表が無ければ None"""
+    m = VARIANT_TABLE_PATTERN.search(page_html or "")
+    if not m:
+        return None
+    rows = [tr for tr in re.split(r"<tr\b", m.group(1))[1:] if "<td" in tr]
+    buyable = sum(1 for tr in rows if 'name="varno_' in tr)
+    return len(rows), buyable
+
+def fetch_variant_stock(page_url):
+    """商品ページを取得して在庫の組み合わせを数える。失敗したら None"""
+    if not page_url:
+        return None
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(page_url, headers={"User-Agent": "Mozilla/5.0 (bath-feed-updater)"})
+            with urllib.request.urlopen(req, timeout=20) as res:
+                body = res.read().decode("cp932", errors="replace")
+            return parse_variant_stock(body)
+        except Exception:
+            time.sleep(2)
+    return None
+
+def low_variant_reason(stock):
+    if not stock:
+        return ""
+    rows, buyable = stock
+    if rows < VARIANT_MIN_ROWS:
+        return ""
+    if buyable <= VARIANT_MAX_BUYABLE or buyable / rows < VARIANT_MIN_RATIO:
+        return f"買える色・サイズが少ない（{rows}通り中{buyable}通り）"
+    return ""
 
 def chatgpt_exclude_reason(row):
     """ChatGPT用フィードから外す理由を返す（外さないなら空文字）"""
@@ -623,7 +677,7 @@ def build_chatgpt_row(row):
         "item_id": item_id,
         "title": title,
         "description": cg_description(row.get("description", "")),
-        "url": row.get("link", ""),
+        "url": add_url_params(row.get("link", ""), CHATGPT_URL_PARAMS),
         "brand": brand,
         "seller_name": STORE_NAME,
         "image_url": row.get("image_link", ""),
@@ -719,9 +773,27 @@ def main():
         processed_rows = list(executor.map(lambda r: process_row(r, timestamp), rows))
         
     # ChatGPT用の行を先に作る（Meta用の仕上げで price を書き換える前の値を使うため）
-    chatgpt_rows, chatgpt_excluded = [], []
+    chatgpt_rows, chatgpt_excluded, candidates = [], [], []
     for row in processed_rows:
         reason = chatgpt_exclude_reason(row)
+        if reason:
+            chatgpt_excluded.append((row.get("id", ""), reason))
+        else:
+            candidates.append(row)
+
+    # 色・サイズごとの在庫を商品ページから読み取り、極端な商品を外す
+    stocks = [None] * len(candidates)
+    if CHATGPT_EXCLUDE_LOW_VARIANT_STOCK and candidates:
+        print(f"商品ページから色・サイズ別の在庫を確認します（{len(candidates)}商品）...")
+        urls = [str(r.get("link", "")).split("?")[0] for r in candidates]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=VARIANT_FETCH_WORKERS) as executor:
+            stocks = list(executor.map(fetch_variant_stock, urls))
+        ok = sum(1 for s_ in stocks if s_)
+        print(f"  在庫表を読み取れた商品: {ok} / {len(candidates)}")
+        if candidates and ok < len(candidates) * 0.5:
+            print("::warning title=在庫の自動判定::商品ページの在庫表を半数以上読み取れませんでした（サイト構成の変更やアクセス制限の可能性）。在庫による除外は読み取れた商品だけに適用しています。")
+    for row, stock in zip(candidates, stocks):
+        reason = low_variant_reason(stock)
         if reason:
             chatgpt_excluded.append((row.get("id", ""), reason))
         else:
