@@ -37,7 +37,7 @@ NEGATIVE_WORD_PATTERN = re.compile(r"※?(返品・交換不可|交換返品不�
 
 # 抽出したい機能キーワード
 FEATURE_KEYWORDS = ["幅広", "甲高", "歩きやすい", "日本製", "撥水", "防水", "軽量", "軽い", "洗える", "3E", "柔らかい", "痛くない", "ムレない"]
-BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "BATH CRAFT"]
+BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "BATH CRAFT", "newmo"]
 
 def clean_text(text):
     if not text:
@@ -192,6 +192,7 @@ ITEM_NO_PATTERN = re.compile(
     r"(№|No[\.,、]?|品番)\s*[0-9A-Za-z\-]+(?:\s*[/／]\s*[0-9A-Za-z\-]+)*\s*",
     re.IGNORECASE
 )
+NEWMO_NAME_PATTERN = re.compile(r"newmo\s*[〈<（(]?\s*ニューモ\s*[〉>）)]?|ニューモ|newmo", re.IGNORECASE)
 BRAND_PAIR_PATTERN = re.compile(r"(COULEUR\s*VARIE|BATH\s*CRAFT)\s*[\(（]\s*(クロールバリエ|バスクラフト)\s*[\)）]", re.IGNORECASE)
 EMPTY_BRACKET_PATTERN = re.compile(r"\(\s*\)|（\s*）|〈\s*〉|「\s*」|【\s*】|\[\s*\]")
 
@@ -276,6 +277,12 @@ def format_title(original_title, item_id=""):
             
     # 「英字(カタカナ)」併記のブランド名はカタカナだけにする（末尾にカタカナのブランド名が付くため、英字は不要）
     title = BRAND_PAIR_PATTERN.sub(r" \2 ", title)
+
+    # newmo は「newmo ニューモ」「newmoニューモ」「newmo〈ニューモ〉」「ニューモ」と表記がばらつくので
+    # すべて「newmo」に統一（下のブランド抽出で末尾に回る）。「×ことりっぷ」のように残るコラボ表記は「ことりっぷコラボ」に
+    if NEWMO_NAME_PATTERN.search(title):
+        title = NEWMO_NAME_PATTERN.sub(" newmo ", title)
+        title = re.sub(r"newmo\s*×\s*(\S+)", r"newmo \1コラボ", title)
 
     # ブランド名を抽出して削除
     found_brand = ""
