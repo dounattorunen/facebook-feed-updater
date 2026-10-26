@@ -424,6 +424,7 @@ CG_MAX_FEATURES = 3
 
 # 商品名 → product_category（上から順に最初に当たったもの）
 CG_CATEGORIES = [
+    (r"トートバッグ|トート", "バッグ > トートバッグ"),   # 「リボンバレエ刺繍 帆布トートバッグ」が靴扱いにならないよう先に判定
     (r"ルームシューズ", "靴 > ルームシューズ"),
     (r"ブーツ|ブーティ", "靴 > ブーツ"),
     (r"サンダル|ミュール|サボ", "靴 > サンダル"),
@@ -580,6 +581,12 @@ CHATGPT_FIELDNAMES = [
 CHATGPT_EXCLUDE_OUT_OF_STOCK = True
 # ② 傘（商品名に 傘 / umbrella / parasol）… CTRが低くCPCが高い、価格が低く採算が合わない（2026/10 広告実績より）
 CHATGPT_EXCLUDE_TITLE_PATTERN = re.compile(r"傘|umbrella|parasol", re.IGNORECASE)
+# ③' カテゴリごと外す（product_category の先頭一致）… バッグは訪問の約2割を占めるが注文がほぼ無い（2026/10 GA4より）
+CHATGPT_EXCLUDE_CATEGORY_PREFIXES = ("バッグ",)
+#    カテゴリ除外の例外として残す商品（在庫切れ・在庫極少の自動除外は通常どおりかかる）
+CHATGPT_KEEP_IDS = {
+    "4726y": "お財布ポシェット：ChatGPT広告で購入実績あり",
+}
 # ③ 個別に外す商品（商品番号: 理由）… 自動判定では拾えない事情で外したい商品があれば追加
 #    例: "8515": "理由",   消せば翌朝から再掲載される
 CHATGPT_EXCLUDE_IDS = {
@@ -653,6 +660,10 @@ def chatgpt_exclude_reason(row):
     raw_title = ITEM_TITLES.get(item_id) or row.get("title", "")
     if CHATGPT_EXCLUDE_TITLE_PATTERN.search(raw_title or ""):
         return "傘"
+    if item_id not in CHATGPT_KEEP_IDS and url_code not in CHATGPT_KEEP_IDS:
+        category = cg_category(cg_title(item_id, raw_title)[0])
+        if category.startswith(CHATGPT_EXCLUDE_CATEGORY_PREFIXES):
+            return f"カテゴリ除外（{category}）"
     if CHATGPT_EXCLUDE_OUT_OF_STOCK and str(row.get("availability", "")).strip().lower().replace("_", " ") == "out of stock":
         return "在庫切れ"
     return ""
