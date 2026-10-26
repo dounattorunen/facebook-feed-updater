@@ -37,7 +37,7 @@ NEGATIVE_WORD_PATTERN = re.compile(r"※?(返品・交換不可|交換返品不�
 
 # 抽出したい機能キーワード
 FEATURE_KEYWORDS = ["幅広", "甲高", "歩きやすい", "日本製", "撥水", "防水", "軽量", "軽い", "洗える", "3E", "柔らかい", "痛くない", "ムレない"]
-BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "BATH CRAFT", "newmo"]
+BRAND_NAMES = ["クロールバリエ", "COULEUR VARIE", "バスクラフト", "BATH CRAFT", "newmo", "elevage"]
 
 def clean_text(text):
     if not text:
@@ -193,6 +193,17 @@ ITEM_NO_PATTERN = re.compile(
     re.IGNORECASE
 )
 NEWMO_NAME_PATTERN = re.compile(r"newmo\s*[〈<（(]?\s*ニューモ\s*[〉>）)]?|ニューモ|newmo", re.IGNORECASE)
+ELEVAGE_NAME_PATTERN = re.compile(r"elevage\s*[〈<（(]?\s*エルバージュ\s*[〉>）)]?|エルバージュ|elevage", re.IGNORECASE)
+# 商品名に入っている長いキャッチコピーのうち、商品名としては不要な部分
+TITLE_DROP_PHRASES = re.compile(r"を使用した初シューズブランド")
+# 特徴語を【】に移したあと、商品名の本体がこの文字数以下になるなら特徴語を名前に残す（例: 軽量パンプス → パンプス を防ぐ）
+TITLE_MIN_CORE_LEN = 5
+
+def title_core(title):
+    t = re.sub(r"【.*?】|[\(（][^\)）]*[\)）]|※.*$|●.*$", "", title)
+    for b in BRAND_NAMES:
+        t = t.replace(b, "")
+    return re.sub(r"[\s/／]+", "", t)
 BRAND_PAIR_PATTERN = re.compile(r"(COULEUR\s*VARIE|BATH\s*CRAFT)\s*[\(（]\s*(クロールバリエ|バスクラフト)\s*[\)）]", re.IGNORECASE)
 EMPTY_BRACKET_PATTERN = re.compile(r"\(\s*\)|（\s*）|〈\s*〉|「\s*」|【\s*】|\[\s*\]")
 
@@ -269,17 +280,27 @@ def format_title(original_title, item_id=""):
         found_features.extend(ITEM_FEATURES[item_id])
     
     # タイトル内の特徴を抽出して削除
+    title_before_features = title
+    removed_kws = []
     for kw in FEATURE_KEYWORDS:
         if kw in title:
             if kw not in found_features:
                 found_features.append(kw)
+                removed_kws.append(kw)
             title = title.replace(kw, "")
+    # 抜いた結果「パンプス」「ブーツ」だけのような名前になるなら、特徴語は名前に残す（【】側からは外して重複させない）
+    if title_core(title) and len(title_core(title)) <= TITLE_MIN_CORE_LEN:
+        title = title_before_features
+        found_features = [f for f in found_features if f not in removed_kws or f not in title]
             
     # 「英字(カタカナ)」併記のブランド名はカタカナだけにする（末尾にカタカナのブランド名が付くため、英字は不要）
     title = BRAND_PAIR_PATTERN.sub(r" \2 ", title)
 
     # newmo は「newmo ニューモ」「newmoニューモ」「newmo〈ニューモ〉」「ニューモ」と表記がばらつくので
     # すべて「newmo」に統一（下のブランド抽出で末尾に回る）。「×ことりっぷ」のように残るコラボ表記は「ことりっぷコラボ」に
+    if ELEVAGE_NAME_PATTERN.search(title):
+        title = ELEVAGE_NAME_PATTERN.sub(" elevage ", title)
+    title = TITLE_DROP_PHRASES.sub(" ", title)
     if NEWMO_NAME_PATTERN.search(title):
         title = NEWMO_NAME_PATTERN.sub(" newmo ", title)
         title = re.sub(r"newmo\s*×\s*(\S+)", r"newmo \1コラボ", title)
@@ -622,6 +643,33 @@ META_STOCK_LABEL_FIELD = "custom_label_0"
 META_LOW_STOCK_MAX_BUYABLE = 1
 META_LOW_STOCK_RATIO = 0.30
 
+# Facebook(Meta)用フィードの custom_label_1 に「注力」を付ける商品（品番の先頭一致：174601 → 174601, 174601-2）
+#   GA4 eコマース（2026/8/1〜10/26）で閲覧→購入率が平均(0.78%)を上回り、在庫に余裕がある秋冬向け商品
+#   代理店は custom_label_1 = 注力 の商品セットに予算を厚くする。入れ替えはこのリストを編集するだけ
+META_FOCUS_LABEL_FIELD = "custom_label_1"
+META_FOCUS_IDS = [
+    "174601",   # newmo 厚底ローファー（売上の約2割）
+    "574237",   # 幅が調整できるオープントゥシューズ
+    "385n",     # 軽量パンプス
+    "978803",   # バスクラフト モカシンローファー
+    "978803h",
+    "078801",   # バスクラフト リングベルトドライビングシューズ
+    "374284",   # 軽量ソフトスクエアスリッポン
+    "574601",   # newmo オールウェザーストレッチスリッポン
+    "960101",   # バスルーム オールウェザーレインスニーカー
+    "578281",   # ボアモカシンシューズ
+    "678230",   # バイカラーパンチングモカシン
+]
+
+def meta_focus_label(item_id):
+    i = str(item_id).lower()
+    for code in META_FOCUS_IDS:
+        c = code.lower()
+        if i == c or i.startswith(c + "-"):
+            return "注力"
+    return "通常"
+
+
 def meta_stock_label(row, stock):
     if str(row.get("availability", "")).strip().lower().replace("_", " ") == "out of stock":
         return "在庫切れ"
@@ -854,12 +902,15 @@ def main():
     for row, stock in zip(processed_rows, stocks):
         m_row = build_meta_row(row)
         m_row[META_STOCK_LABEL_FIELD] = meta_stock_label(row, stock)
+        m_row[META_FOCUS_LABEL_FIELD] = meta_focus_label(row.get("id", ""))
         meta_rows.append(m_row)
-    meta_fieldnames = fieldnames + [f for f in ("brand", "sale_price", META_STOCK_LABEL_FIELD) if f not in fieldnames]
+    meta_fieldnames = fieldnames + [f for f in ("brand", "sale_price", META_STOCK_LABEL_FIELD, META_FOCUS_LABEL_FIELD) if f not in fieldnames]
     label_counts = {}
     for m_row in meta_rows:
         label_counts[m_row[META_STOCK_LABEL_FIELD]] = label_counts.get(m_row[META_STOCK_LABEL_FIELD], 0) + 1
     print(f"Facebook用 {META_STOCK_LABEL_FIELD}（在庫の状態）: {label_counts}")
+    focus = [m["id"] for m in meta_rows if m[META_FOCUS_LABEL_FIELD] == "注力"]
+    print(f"Facebook用 {META_FOCUS_LABEL_FIELD}（注力）: {len(focus)}商品 {focus}")
     with open(output_file, "w", encoding="utf-8", newline="") as outfile:
         writer = csv.DictWriter(outfile, fieldnames=meta_fieldnames)
         writer.writeheader()
