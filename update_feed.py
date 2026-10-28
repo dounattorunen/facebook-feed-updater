@@ -6,6 +6,7 @@ from urllib.error import HTTPError, URLError
 import time
 import ssl
 import concurrent.futures
+import threading
 import glob
 import unicodedata
 from datetime import datetime
@@ -339,6 +340,50 @@ def format_title(original_title, item_id=""):
 # ==========================================
 # 3. 画像確認・行処理
 # ==========================================
+# ==========================================
+# 商品ページ（bath-ec.com）の取得：追加画像の番号と、色・サイズ別の在庫の両方に使う
+# ==========================================
+PRODUCT_PAGE_CACHE = {}
+PRODUCT_PAGE_SEMAPHORE = threading.Semaphore(5)   # 自社サイトへの同時アクセスは5まで
+MAX_ADDITIONAL_IMAGES = 10
+
+def fetch_product_page(page_url):
+    """商品ページのHTMLを返す（1回の実行で同じURLは1度だけ取得）。失敗したら None"""
+    page_url = str(page_url or "").split("?")[0]
+    if not page_url:
+        return None
+    if page_url in PRODUCT_PAGE_CACHE:
+        return PRODUCT_PAGE_CACHE[page_url]
+    body = None
+    with PRODUCT_PAGE_SEMAPHORE:
+        for attempt in range(2):
+            try:
+                req = urllib.request.Request(page_url, headers={"User-Agent": "Mozilla/5.0 (bath-feed-updater)"})
+                with urllib.request.urlopen(req, timeout=20) as res:
+                    body = res.read().decode("cp932", errors="replace")
+                break
+            except Exception:
+                time.sleep(2)
+    PRODUCT_PAGE_CACHE[page_url] = body
+    return body
+
+def page_image_urls(page_html, item_id):
+    """商品ページに載っている画像（…/{id}-m-NN-ds.jpg 等）から、01以外の大きい画像(-pl.jpg)のURLを掲載順に返す。
+    画像番号は連番とは限らない（例: 01, 04, 05, 08 …）"""
+    if not page_html or not item_id:
+        return []
+    pat = re.compile(r"(https?://bath\.fs-storage\.jp/fs2cabinet/[^\"'\s]*?/" + re.escape(item_id) +
+                     r"-m-)(\d{2})-(?:ds|pl|dl|l|s)\.jpg", re.IGNORECASE)
+    urls, seen = [], set()
+    for m in pat.finditer(page_html):
+        num = m.group(2)
+        if num == "01" or num in seen:
+            continue
+        seen.add(num)
+        urls.append(f"{m.group(1)}{num}-pl.jpg")
+    return urls
+
+
 def check_image_exists(image_url):
     try:
         req = urllib.request.Request(image_url, method='HEAD')
@@ -381,17 +426,25 @@ def process_row(row, timestamp):
         separator = "&" if "?" in original_url else "?"
         row["image_link"] = f"{original_url}{separator}v={timestamp}"
 
-    # 【B】追加画像のルールベース自動生成
+    # 【B】追加画像：商品ページに載っている画像番号から作る（番号は飛び飛びのことがある）
     additional_urls = []
     if item_id:
-        dir_prefix = item_id[:3]
-        for i in range(2, 7):
-            img_num = f"{i:02d}"
-            test_url = f"https://bath.fs-storage.jp/fs2cabinet/{dir_prefix}/{item_id}/{item_id}-m-{img_num}-pl.jpg"
-            if check_image_exists(test_url):
-                additional_urls.append(f"{test_url}?v={timestamp}")
-            else:
-                break
+        page_html = fetch_product_page(row.get("link", ""))
+        if page_html is not None:
+            for test_url in page_image_urls(page_html, item_id):
+                if len(additional_urls) >= MAX_ADDITIONAL_IMAGES:
+                    break
+                if check_image_exists(test_url):
+                    additional_urls.append(f"{test_url}?v={timestamp}")
+        else:
+            # 商品ページが取れなかったときは従来どおり 02 から順に探す
+            dir_prefix = item_id[:3]
+            for i in range(2, 7):
+                test_url = f"https://bath.fs-storage.jp/fs2cabinet/{dir_prefix}/{item_id}/{item_id}-m-{i:02d}-pl.jpg"
+                if check_image_exists(test_url):
+                    additional_urls.append(f"{test_url}?v={timestamp}")
+                else:
+                    break
     row["additional_image_link"] = ",".join(additional_urls)
 
     # 【C】文字数の安全装置（Facebook/ChatGPT両フィードとも上限5000/150文字）
@@ -704,18 +757,9 @@ def parse_variant_stock(page_html):
     return len(rows), buyable
 
 def fetch_variant_stock(page_url):
-    """商品ページを取得して在庫の組み合わせを数える。失敗したら None"""
-    if not page_url:
-        return None
-    for attempt in range(2):
-        try:
-            req = urllib.request.Request(page_url, headers={"User-Agent": "Mozilla/5.0 (bath-feed-updater)"})
-            with urllib.request.urlopen(req, timeout=20) as res:
-                body = res.read().decode("cp932", errors="replace")
-            return parse_variant_stock(body)
-        except Exception:
-            time.sleep(2)
-    return None
+    """商品ページ（取得済みならキャッシュ）から在庫の組み合わせを数える。失敗したら None"""
+    body = fetch_product_page(page_url)
+    return parse_variant_stock(body) if body else None
 
 def low_variant_reason(stock):
     if not stock:
