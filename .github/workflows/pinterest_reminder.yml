@@ -1,0 +1,49 @@
+name: Pinterest CSV Reminder
+
+on:
+  schedule:
+    # 毎日 日本時間の朝9時 (UTCで0:00) にチェック
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check last publish date
+        id: check
+        run: python check_pinterest_schedule.py
+
+      # 残り2日以内なら、まだ開いていない場合だけIssueを作る（GitHubから登録メールに通知が届く）
+      - name: Open reminder issue
+        if: steps.check.outputs.remind == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          TITLE="Pinterestの予約ピンCSVを作成・アップロードしてください"
+          if gh issue list -R "$REPO" --state open --search "\"$TITLE\" in:title" --json number --jq 'length' | grep -qv '^0$'; then
+            echo "通知用のIssueはすでに開いています"
+            exit 0
+          fi
+          BODY=$(cat <<TXT
+          @${{ github.repository_owner }}
+
+          pinterest_bulk.csv の予約投稿は **${{ steps.check.outputs.last_date }}** で終わります（残り ${{ steps.check.outputs.days_left }} 日）。
+
+          **手順**
+          1. Actions タブ →「Pinterest Bulk CSV」→「Run workflow」
+          2. 完了したら pinterest_bulk.csv をダウンロード
+          3. その日のうちに Pinterest の「ピンの一括作成」でアップロード（公開日時は実行した翌日12時から28日分）
+
+          「Pinterest Bulk CSV」を実行すると、このIssueは自動で閉じます。
+          TXT
+          )
+          gh issue create -R "$REPO" --title "$TITLE" --body "$BODY"

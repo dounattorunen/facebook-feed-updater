@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
 
     steps:
       - name: Checkout repository
@@ -45,3 +46,13 @@ jobs:
           git add pinterest_bulk.csv pinterest_csv_done.json
           git diff --staged --quiet || git commit -m "Pinterest bulk CSV: $(date +'%Y-%m-%d')"
           git push
+
+      # 通知用のIssue（Pinterest CSV Reminder が作成）を閉じる
+      - name: Close reminder issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for n in $(gh issue list -R "$REPO" --state open --search '"Pinterestの予約ピンCSVを作成・アップロードしてください" in:title' --json number --jq '.[].number'); do
+            gh issue close "$n" -R "$REPO" --comment "新しい pinterest_bulk.csv を作成しました。忘れずに Pinterest にアップロードしてください。"
+          done
