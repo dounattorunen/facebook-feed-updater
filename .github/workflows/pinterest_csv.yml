@@ -45,6 +45,7 @@ jobs:
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add pinterest_bulk.csv pinterest_csv_done.json
           git diff --staged --quiet || git commit -m "Pinterest bulk CSV: $(date +'%Y-%m-%d')"
+          git pull --rebase origin main
           git push
 
       # 通知用のIssue（Pinterest CSV Reminder が作成）を閉じる
