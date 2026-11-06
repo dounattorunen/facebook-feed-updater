@@ -695,6 +695,11 @@ VARIANT_TABLE_PATTERN = re.compile(
 META_STOCK_LABEL_FIELD = "custom_label_0"
 META_LOW_STOCK_MAX_BUYABLE = 1
 META_LOW_STOCK_RATIO = 0.30
+# 買える色・サイズが極端に少ない商品（ChatGPT用の除外と同じ基準：1通り以下 または 15%未満）は
+# Facebook用フィードで availability を out of stock にして、カタログ広告の配信から自動で外す。
+# 再入荷して商品ページで買える組み合わせが戻れば、翌朝の実行で in stock に戻る。
+# （2026/9-10 FB DPA：該当48商品のキーイベント率0.69%、それ以外1.64%）
+META_MARK_LOW_VARIANT_OUT_OF_STOCK = True
 
 # Facebook(Meta)用フィードの custom_label_1 に「注力」を付ける商品（品番の先頭一致：174601 → 174601, 174601-2）
 #   GA4 eコマース（2026/8/1〜10/26）で閲覧→購入率が平均(0.78%)を上回り、在庫に余裕がある秋冬向け商品
@@ -941,17 +946,25 @@ def main():
             chatgpt_rows.append(build_chatgpt_row(row))
 
     # Facebook用フィードの保存（brand / sale_price / タイトルのノイズを仕上げる）
-    meta_rows = []
+    meta_rows, meta_marked_oos = [], []
     for row, stock in zip(processed_rows, stocks):
         m_row = build_meta_row(row)
         m_row[META_STOCK_LABEL_FIELD] = meta_stock_label(row, stock)
         m_row[META_FOCUS_LABEL_FIELD] = meta_focus_label(row.get("id", ""))
+        if (META_MARK_LOW_VARIANT_OUT_OF_STOCK and low_variant_reason(stock)
+                and str(m_row.get("availability", "")).strip().lower() != "out of stock"):
+            m_row["availability"] = "out of stock"
+            m_row[META_STOCK_LABEL_FIELD] = "在庫切れ"
+            meta_marked_oos.append((m_row.get("id", ""), low_variant_reason(stock)))
         meta_rows.append(m_row)
     meta_fieldnames = fieldnames + [f for f in ("brand", "sale_price", META_STOCK_LABEL_FIELD, META_FOCUS_LABEL_FIELD) if f not in fieldnames]
     label_counts = {}
     for m_row in meta_rows:
         label_counts[m_row[META_STOCK_LABEL_FIELD]] = label_counts.get(m_row[META_STOCK_LABEL_FIELD], 0) + 1
     print(f"Facebook用 {META_STOCK_LABEL_FIELD}（在庫の状態）: {label_counts}")
+    print(f"Facebook用 在庫が極端に少ないため売り切れ扱いにした商品: {len(meta_marked_oos)}商品")
+    for item_id, reason in meta_marked_oos:
+        print(f"  - 売り切れ扱い {item_id}: {reason}")
     focus = [m["id"] for m in meta_rows if m[META_FOCUS_LABEL_FIELD] == "注力"]
     print(f"Facebook用 {META_FOCUS_LABEL_FIELD}（注力）: {len(focus)}商品 {focus}")
     with open(output_file, "w", encoding="utf-8", newline="") as outfile:
