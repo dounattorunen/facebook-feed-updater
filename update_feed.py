@@ -80,6 +80,7 @@ def strip_html_to_text(html_text):
 GOODS_REQUIRED_COLUMNS = ["商品番号", "商品名", "メイングループ", "商品説明文", "キーワード"]
 GOODS_MIN_ROWS = 100  # これより少なければダウンロード範囲の誤りとみなす
 
+ITEM_KEYWORDS = {}     # 商品番号 → futureshopのキーワード（サイト内検索用）
 ITEM_LIST_PRICES = {}  # 商品番号 → 定価（load_goods で埋める。ChatGPTフィードの price / sale_price 用）
 
 def load_goods():
@@ -132,6 +133,7 @@ def load_goods():
                 pass
         keywords_str = row.get("キーワード", "")
         if keywords_str:
+            ITEM_KEYWORDS[item_id] = keywords_str
             keywords = [k.strip() for k in keywords_str.split(",")]
             matched = [k for k in keywords if k in FEATURE_KEYWORDS]
             if matched:
@@ -895,6 +897,109 @@ def build_meta_row(row):
     out["title"] = clean_meta_title(row.get("title", ""), bool(out["sale_price"]))
     return out
 
+
+# ==========================================
+# 3.7 サイト内検索用インデックス（search_index.json）
+# ==========================================
+# 商品ページの在庫表（色×サイズ）と商品情報から、自前のサイト内検索が読むJSONを作る。
+# futureshopのFTP public_html/search/search_index.json に毎朝アップロードする（update.yml）。
+# 在庫切れの商品（フィードで out of stock・または全色全サイズ在庫切れ）は入れない。
+search_index_file = "search_index.json"
+SEARCH_DESC_MAX = 200          # 説明文は検索に使う先頭だけ（JSONを軽くするため）
+VARIANT_STATUS_PATTERN = re.compile(r"\s*/\s*(在庫切れ|△?残りわずか|×|△|○|予約.*|入荷待ち.*)\s*$")
+
+SIZE_LABEL_PATTERN = re.compile(
+    r"^(?:\d{2}(?:\.\d)?\s*(?:cm|センチ)?|(?:SS|S|M|L|LL|3L|F|FREE|フリー)(?:\s*[\(（].*[\)）])?)$", re.I)
+COLOR_WRAPPER_PATTERN = re.compile(r"^【\s*(?:color|カラー|色)\s*[:：]\s*(.*?)】$", re.I)
+
+def clean_variant_label(text):
+    """在庫表の表記をそろえる：全角/半角（NFKC）、分離した濁点の結合、【color:○○】の外枠、先頭の色番号（50.）"""
+    t = unicodedata.normalize("NFKC", html.unescape(re.sub(r"<[^>]+>", "", text or ""))).strip()
+    t = unicodedata.normalize("NFC", re.sub(r"\s?([゙゚])", r"\1", t))
+    m = COLOR_WRAPPER_PATTERN.match(t)
+    if m:
+        t = m.group(1).strip()
+    t = re.sub(r"^\d{1,3}\.(?=\D)", "", t)
+    t = re.sub(r"^(\d{2})\.0(?=\s*cm)", r"\1", t)     # 25.0cm → 25cm
+    return t.strip()
+
+def is_size_label(text):
+    return bool(SIZE_LABEL_PATTERN.match(text or ""))
+
+def parse_variants(page_html):
+    """商品ページの在庫表から [[サイズ, 色, 状態], ...] を返す。状態 0=在庫切れ 1=在庫あり 2=残りわずか。
+    表の左列（th）は空欄なら上の行と同じ。左列がサイズ・右列が色のことが多いが、
+    左列が【color:ブラック】・右列がサイズの商品もあるので、サイズらしい方をサイズとして扱う。表が無ければ None"""
+    m = VARIANT_TABLE_PATTERN.search(page_html or "")
+    if not m:
+        return None
+    out, left = [], ""
+    for tr in re.split(r"<tr\b", m.group(1))[1:]:
+        th = re.search(r"<th[^>]*>(.*?)</th>", tr, re.S)
+        td = re.search(r"<td[^>]*>(.*?)</td>", tr, re.S)
+        if not td:
+            continue
+        if th and clean_variant_label(th.group(1)):
+            left = clean_variant_label(th.group(1))
+        right_raw = unicodedata.normalize("NFKC", html.unescape(re.sub(r"<[^>]+>", "", td.group(1)))).strip()
+        sm = VARIANT_STATUS_PATTERN.search(right_raw)
+        right = clean_variant_label(right_raw[:sm.start()] if sm else right_raw)
+        if 'name="varno_' in tr:
+            status = 2 if (sm and "残り" in sm.group(1)) else 1
+        else:
+            status = 0
+        size, color = left, right
+        if is_size_label(right) and not is_size_label(left):
+            size, color = right, left
+        out.append([size, color, status])
+    return out
+
+def _yen(value):
+    m = re.match(r"\s*(\d+)", value or "")
+    return int(m.group(1)) if m else None
+
+def build_search_entry(row, meta_row):
+    item_id = row.get("id", "")
+    link = str(row.get("link", "")).split("?")[0]
+    if str(row.get("availability", "")).strip().lower().replace("_", " ") == "out of stock":
+        return None
+    variants = None
+    page_html = PRODUCT_PAGE_CACHE.get(link)
+    if page_html:
+        variants = parse_variants(page_html)
+        if variants and not any(v[2] for v in variants):
+            return None          # 全色・全サイズ在庫切れ
+    raw_title = ITEM_TITLES.get(item_id) or row.get("title", "")
+    title, brand, _mens = cg_title(item_id, raw_title)
+    brand_label = cg_brand(item_id, raw_title)[1]
+    price, sale = _yen(meta_row.get("price")), _yen(meta_row.get("sale_price"))
+    keywords = " ".join(filter(None, [
+        raw_title, meta_row.get("title", ""), ITEM_KEYWORDS.get(item_id, "").replace(",", " "),
+        brand_label, item_id,
+    ]))
+    return {
+        "id": item_id,
+        "t": title,
+        "b": brand_label,
+        "c": cg_category(title),
+        "u": link,
+        "i": str(row.get("image_link", "")).split("?")[0],
+        "p": price,                       # 定価（セールでなければ販売価格）
+        "s": sale,                        # セール価格（無ければ null）
+        "k": " ".join(dict.fromkeys(unicodedata.normalize("NFKC", html.unescape(keywords)).split())),  # 重複語は1回に
+        "d": truncate_field(row.get("description", ""), SEARCH_DESC_MAX),
+        "v": [v for v in (variants or []) if v[2]],   # 買える色・サイズだけ
+    }
+
+def write_search_index(processed_rows, meta_rows):
+    import json
+    items = [e for e in (build_search_entry(r, m) for r, m in zip(processed_rows, meta_rows)) if e]
+    data = {"updated": datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M"), "items": items}
+    with open(search_index_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    with_v = sum(1 for e in items if e["v"])
+    print(f"サイト内検索用インデックスを出力しました: {search_index_file}（{len(items)}商品 / 色・サイズあり {with_v}商品）")
+
 # ==========================================
 # 4. メイン処理
 # ==========================================
@@ -973,6 +1078,12 @@ def main():
         writer.writerows(meta_rows)
 
     print(f"Facebook用フィードを出力しました: {output_file}")
+
+    # サイト内検索用インデックス（失敗してもフィードの更新は止めない）
+    try:
+        write_search_index(processed_rows, meta_rows)
+    except Exception as e:
+        print(f"::warning title=サイト内検索インデックス::作成に失敗しました: {e}")
 
     # ChatGPT用フィードの保存
 

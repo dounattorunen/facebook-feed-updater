@@ -39,6 +39,17 @@ jobs:
           git pull --rebase origin main
           git push
 
+      # ③' サイト内検索用インデックスを futureshop のFTPへ転送（/search/search_index.json）
+      - name: Upload search index via cURL
+        run: |
+          if [ -s search_index.json ]; then
+            curl -sS --fail --ftp-create-dirs --connect-timeout 30 --max-time 120 \
+              --retry 5 --retry-delay 20 --retry-all-errors \
+              -T search_index.json "ftp://${{ secrets.FTP_SERVER }}/public_html/search/search_index.json" --user "${{ secrets.FTP_USERNAME }}:${{ secrets.FTP_PASSWORD }}"
+          else
+            echo "::warning title=サイト内検索::search_index.json が作られていないためアップロードしませんでした"
+          fi
+
       # ④ XMLをfutureshopのFTPへ転送（★ pinterest_*.xml をすべて転送）
       - name: Upload XML via cURL
         run: |
