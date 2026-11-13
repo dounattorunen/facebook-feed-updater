@@ -954,6 +954,13 @@ def parse_variants(page_html):
         out.append([size, color, status])
     return out
 
+MEMBER_PRICE_PATTERN = re.compile(r'class="FS2_special_members_price".*?class="itemPrice">\s*([\d,]+)\s*円', re.S)
+
+def parse_member_price(page_html):
+    """商品ページの「会員特別価格」（会員ログインで適用される価格）。無ければ None"""
+    m = MEMBER_PRICE_PATTERN.search(page_html or "")
+    return int(m.group(1).replace(",", "")) if m else None
+
 def _yen(value):
     m = re.match(r"\s*(\d+)", value or "")
     return int(m.group(1)) if m else None
@@ -1039,6 +1046,7 @@ def build_search_entry(row, meta_row):
         "f": search_features(item_id, f"{raw_title} {meta_title}", f"{row.get('description', '')} {ITEM_DESCRIPTIONS.get(item_id, '')}"),
         "n": season_label(meta_title),            # 新作表記（季節つきならサムネにアイコン）
         "nc": "新色" in meta_title,               # 新色
+        "mp": parse_member_price(page_html),      # 会員特別価格（ログインで適用。無ければ null）
     }
 
 def write_search_index(processed_rows, meta_rows):
