@@ -958,6 +958,52 @@ def _yen(value):
     m = re.match(r"\s*(\d+)", value or "")
     return int(m.group(1)) if m else None
 
+
+# サイト内検索の絞り込み用「特徴」。商品名（【】の特徴タグを含むフィード用タイトル）から判定する。
+# 説明文まで見ると「幅広の方に」などの言い回しで誤判定するため、説明文を使うのはワイズと「洗える」だけ。
+SEARCH_FEATURES = [
+    ("幅広", re.compile(r"幅広|ワイド")),
+    ("甲高", re.compile(r"甲高")),
+    ("軽量", re.compile(r"軽量|軽い")),
+    ("柔らかい", re.compile(r"柔らか")),
+    ("痛くない", re.compile(r"痛くない")),
+    ("ムレない", re.compile(r"ムレない|蒸れない|ムレにくい")),
+    ("撥水・防水", re.compile(r"撥水|はっ水|防水|オールウェザー")),
+]
+WIDTH_PATTERN = re.compile(r"(?<![0-9A-Z])([234])E(?![A-Z])")
+
+def search_features(item_id, titles_text, desc_text):
+    t = unicodedata.normalize("NFKC", titles_text)
+    d = unicodedata.normalize("NFKC", re.sub(r"<[^>]+>", " ", desc_text or ""))
+    feats = [name for name, pat in SEARCH_FEATURES if pat.search(t)]
+    # ワイズ（2E/3E/4E）は商品名と説明文から
+    for w in sorted(set(WIDTH_PATTERN.findall(t + " " + d))):
+        feats.append(f"{w}E")
+    # 洗える：洗えないブランドは付けない。否定（洗えません等）・インソールだけの話は除く
+    if not is_non_washable(item_id, titles_text):
+        washable = "洗える" in t
+        for m in BODY_WASH_PATTERN.finditer(d):
+            if not WASHABLE_NEGATION_PATTERN.search(d[m.end():m.end() + 20]):
+                washable = True
+                break
+        if washable:
+            feats.append("洗える")
+    return feats
+
+def season_label(title_text):
+    """フィード用タイトルの新作表記を「2026秋冬新作」「2027春夏新作」「2026新作」の形にそろえる（無ければ空）。
+    表記の切り替え・削除は apply_label_rules が日付で済ませているので、ここは今の表記を読むだけ。"""
+    m = SEASON_LABEL_PATTERN.search(unicodedata.normalize("NFKC", title_text or ""))
+    if not m:
+        return ""
+    year = m.group(1)
+    season = (m.group(2) or "").upper()
+    if season in SPRING_SUMMER:
+        return f"{year}春夏新作"
+    if season:
+        return f"{year}秋冬新作"
+    return f"{year}新作"
+
 def build_search_entry(row, meta_row):
     item_id = row.get("id", "")
     link = str(row.get("link", "")).split("?")[0]
@@ -973,6 +1019,7 @@ def build_search_entry(row, meta_row):
     title, brand, _mens = cg_title(item_id, raw_title)
     brand_label = cg_brand(item_id, raw_title)[1]
     price, sale = _yen(meta_row.get("price")), _yen(meta_row.get("sale_price"))
+    meta_title = meta_row.get("title", "")
     keywords = " ".join(filter(None, [
         raw_title, meta_row.get("title", ""), ITEM_KEYWORDS.get(item_id, "").replace(",", " "),
         brand_label, item_id,
@@ -989,6 +1036,9 @@ def build_search_entry(row, meta_row):
         "k": " ".join(dict.fromkeys(unicodedata.normalize("NFKC", html.unescape(keywords)).split())),  # 重複語は1回に
         "d": truncate_field(row.get("description", ""), SEARCH_DESC_MAX),
         "v": [v for v in (variants or []) if v[2]],   # 買える色・サイズだけ
+        "f": search_features(item_id, f"{raw_title} {meta_title}", f"{row.get('description', '')} {ITEM_DESCRIPTIONS.get(item_id, '')}"),
+        "n": season_label(meta_title),            # 新作表記（季節つきならサムネにアイコン）
+        "nc": "新色" in meta_title,               # 新色
     }
 
 def write_search_index(processed_rows, meta_rows):
