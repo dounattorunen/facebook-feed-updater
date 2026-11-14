@@ -979,7 +979,11 @@ SEARCH_FEATURES = [
 ]
 WIDTH_PATTERN = re.compile(r"(?<![0-9A-Z])([234])E(?![A-Z])")
 
-def search_features(item_id, titles_text, desc_text):
+# 足の形に関する特徴。靴以外（バッグ・傘など）には付けない
+# （キーワード欄に靴用の語がそのまま入っている商品があるため。例: リュック 235651 の「3E,幅広,甲高」）
+FOOT_ONLY_FEATURES = {"幅広", "甲高", "痛くない", "ムレない", "2E", "3E", "4E"}
+
+def search_features(item_id, titles_text, desc_text, category=""):
     t = unicodedata.normalize("NFKC", titles_text)
     d = unicodedata.normalize("NFKC", re.sub(r"<[^>]+>", " ", desc_text or ""))
     feats = [name for name, pat in SEARCH_FEATURES if pat.search(t)]
@@ -995,6 +999,8 @@ def search_features(item_id, titles_text, desc_text):
                 break
         if washable:
             feats.append("洗える")
+    if category and not category.startswith("靴"):
+        feats = [f for f in feats if f not in FOOT_ONLY_FEATURES]
     return feats
 
 def season_label(title_text):
@@ -1043,7 +1049,7 @@ def build_search_entry(row, meta_row):
         "k": " ".join(dict.fromkeys(unicodedata.normalize("NFKC", html.unescape(keywords)).split())),  # 重複語は1回に
         "d": truncate_field(row.get("description", ""), SEARCH_DESC_MAX),
         "v": [v for v in (variants or []) if v[2]],   # 買える色・サイズだけ
-        "f": search_features(item_id, f"{raw_title} {meta_title}", f"{row.get('description', '')} {ITEM_DESCRIPTIONS.get(item_id, '')}"),
+        "f": search_features(item_id, f"{raw_title} {meta_title}", f"{row.get('description', '')} {ITEM_DESCRIPTIONS.get(item_id, '')}", cg_category(title)),
         "n": season_label(meta_title),            # 新作表記（季節つきならサムネにアイコン）
         "nc": "新色" in meta_title,               # 新色
         "mp": parse_member_price(page_html),      # 会員特別価格（ログインで適用。無ければ null）
