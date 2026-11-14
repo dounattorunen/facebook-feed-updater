@@ -327,6 +327,12 @@ def format_title(original_title, item_id=""):
     if is_non_washable(item_id, original_title):
         found_features = [f for f in found_features if not WASHABLE_CLAIM_PATTERN.search(f)]
 
+    # 靴以外（バッグ・傘など）には足の形のタグ（幅広・甲高・3E など）を付けない
+    # （キーワード欄に靴用の語が入っている商品があるため。ChatGPT用・サイト内検索と同じ基準）
+    category = cg_category(title)
+    if category and not category.startswith("靴"):
+        found_features = [f for f in found_features if f not in CG_SHOE_ONLY_FEATURES and f not in FOOT_ONLY_FEATURES]
+
     if found_features:
         unique_features = list(dict.fromkeys(found_features))
         features_str = "・".join(unique_features)
