@@ -1,3 +1,4 @@
+import os
 import csv
 import html
 import re
@@ -1061,13 +1062,24 @@ def build_search_entry(row, meta_row):
         "mp": parse_member_price(page_html),      # 会員特別価格（ログインで適用。無ければ null）
     }
 
+# 出来上がったデータがこれより少なければ、何かの失敗（フィードの取得・商品ページの読み込み）とみなし、
+# 検索データを作らない（＝前回のデータをサイトに残す）
+SEARCH_MIN_ITEMS = 100           # 在庫ありの商品数
+SEARCH_MIN_VARIANT_RATIO = 0.8   # 色・サイズの在庫表が読めた商品の割合
+
 def write_search_index(processed_rows, meta_rows):
     import json
     items = [e for e in (build_search_entry(r, m) for r, m in zip(processed_rows, meta_rows)) if e]
+    with_v = sum(1 for e in items if e["v"])
+    if len(items) < SEARCH_MIN_ITEMS or with_v < len(items) * SEARCH_MIN_VARIANT_RATIO:
+        if os.path.exists(search_index_file):
+            os.remove(search_index_file)
+        print(f"::warning title=サイト内検索::データが不完全なため更新しませんでした（{len(items)}商品 / 色・サイズあり {with_v}商品）。"
+              "サイトには前回のデータが残ります")
+        return
     data = {"updated": datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M"), "items": items}
     with open(search_index_file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-    with_v = sum(1 for e in items if e["v"])
     print(f"サイト内検索用インデックスを出力しました: {search_index_file}（{len(items)}商品 / 色・サイズあり {with_v}商品）")
 
 # ==========================================

@@ -8,6 +8,11 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch: # 管理画面から手動で実行するためのボタン
 
+# 実行が重なったときは、前の実行が終わるまで次を待たせる（同時に書き込んでぶつからないように）
+concurrency:
+  group: update-feed
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
