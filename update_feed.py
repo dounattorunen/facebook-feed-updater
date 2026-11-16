@@ -968,6 +968,14 @@ def parse_member_price(page_html):
     m = MEMBER_PRICE_PATTERN.search(page_html or "")
     return int(m.group(1).replace(",", "")) if m else None
 
+PAGE_TITLE_PATTERN = re.compile(r'<h1 class="itemTitle">(.*?)</h1>', re.S)
+
+def parse_page_title(page_html):
+    """商品ページに今出ている商品名（キャッチコピー込み）。
+    goods_*.csv の商品名は古いことがあるので、「ブラックフライデー」などの最新の文言はここから拾う"""
+    m = PAGE_TITLE_PATTERN.search(page_html or "")
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", m.group(1)))).strip() if m else ""
+
 def _yen(value):
     m = re.match(r"\s*(\d+)", value or "")
     return int(m.group(1)) if m else None
@@ -1041,7 +1049,7 @@ def build_search_entry(row, meta_row):
     price, sale = _yen(meta_row.get("price")), _yen(meta_row.get("sale_price"))
     meta_title = meta_row.get("title", "")
     keywords = " ".join(filter(None, [
-        raw_title, meta_row.get("title", ""), ITEM_KEYWORDS.get(item_id, "").replace(",", " "),
+        raw_title, parse_page_title(page_html), meta_row.get("title", ""), ITEM_KEYWORDS.get(item_id, "").replace(",", " "),
         brand_label, item_id,
     ]))
     return {
