@@ -976,6 +976,13 @@ def parse_page_title(page_html):
     m = PAGE_TITLE_PATTERN.search(page_html or "")
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", m.group(1)))).strip() if m else ""
 
+PAGE_KEYWORDS_PATTERN = re.compile(r'<meta\s+name="keywords"\s+content="([^"]*)"', re.I)
+
+def parse_page_keywords(page_html):
+    """商品ページに出ている「キーワード」欄（meta keywords）。読めなければ None"""
+    m = PAGE_KEYWORDS_PATTERN.search(page_html or "")
+    return html.unescape(m.group(1)).replace(",", " ").strip() if m else None
+
 def _yen(value):
     m = re.match(r"\s*(\d+)", value or "")
     return int(m.group(1)) if m else None
@@ -1048,8 +1055,10 @@ def build_search_entry(row, meta_row):
     brand_label = cg_brand(item_id, raw_title)[1]
     price, sale = _yen(meta_row.get("price")), _yen(meta_row.get("sale_price"))
     meta_title = meta_row.get("title", "")
+    # キーワード欄は商品ページの最新の内容を使う（読めないときだけ goods_*.csv の値）
+    page_keywords = parse_page_keywords(page_html)
     keywords = " ".join(filter(None, [
-        raw_title, parse_page_title(page_html), meta_row.get("title", ""), ITEM_KEYWORDS.get(item_id, "").replace(",", " "),
+        raw_title, parse_page_title(page_html), meta_row.get("title", ""), page_keywords if page_keywords is not None else ITEM_KEYWORDS.get(item_id, "").replace(",", " "),
         brand_label, item_id,
     ]))
     return {
