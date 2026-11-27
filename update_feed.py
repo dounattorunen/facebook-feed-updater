@@ -83,6 +83,7 @@ GOODS_MIN_ROWS = 100  # これより少なければダウンロード範囲の�
 
 ITEM_KEYWORDS = {}     # 商品番号 → futureshopのキーワード（サイト内検索用）
 ITEM_LIST_PRICES = {}  # 商品番号 → 定価（load_goods で埋める。ChatGPTフィードの price / sale_price 用）
+ITEM_REGULAR_PRICES = {}  # 商品番号(小文字) → 定価（表示方法に関係なく。サイト内検索の補完用）
 
 def load_goods():
     """goods_*.csv を1回だけ読み、説明文・特徴・商品名の辞書を返す"""
@@ -127,6 +128,11 @@ def load_goods():
         group_dict[item_id] = row.get("メイングループ", "").strip()
         # ChatGPT用 sale_price：サイトに定価（取り消し線）を表示している商品だけ定価を控える
         list_price = str(row.get("定価", "")).strip()
+        try:
+            if list_price:
+                ITEM_REGULAR_PRICES[item_id.lower()] = int(float(list_price))
+        except ValueError:
+            pass
         if list_price and str(row.get("定価表示方法", "")).strip() == "1":
             try:
                 ITEM_LIST_PRICES[item_id] = int(float(list_price))
@@ -1084,9 +1090,67 @@ def build_search_entry(row, meta_row):
 SEARCH_MIN_ITEMS = 100           # 在庫ありの商品数
 SEARCH_MIN_VARIANT_RATIO = 0.8   # 色・サイズの在庫表が読めた商品の割合
 
+SITEMAP_URL = "https://www.bath-ec.com/sitemap.xml"
+SUPPLEMENT_MAX = 80   # 補完する商品数の上限（サイトへのアクセスを増やしすぎないため）
+
+def _meta(page_html, prop, attr="property"):
+    m = re.search(rf'<meta\s+{attr}="{re.escape(prop)}"\s+content="([^"]*)"', page_html or "")
+    return html.unescape(m.group(1)).strip() if m else ""
+
+def supplement_search_entries(feed_ids):
+    """フィードに無い公開商品（管理画面で「他社サービスに公開」を外した商品）を、サイトマップと商品ページから補う。
+    広告用のフィードには載せず、サイト内検索にだけ出す"""
+    try:
+        req = urllib.request.Request(SITEMAP_URL, headers={"User-Agent": "Mozilla/5.0 (bath-feed-updater)"})
+        with urllib.request.urlopen(req, timeout=20) as res:
+            xml = res.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"::warning title=サイト内検索 補完::サイトマップを読めませんでした（{e}）。補完せずに進めます")
+        return []
+    have = {str(i).lower() for i in feed_ids}
+    urls = []
+    for u in re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", xml):
+        m = re.match(r"https?://www\.bath-ec\.com/fs/bath/([^/?#]+)$", u)
+        if m and not m.group(1).endswith(".html") and m.group(1).lower() not in have:
+            urls.append(u)
+    urls = list(dict.fromkeys(urls))[:SUPPLEMENT_MAX]
+    if not urls:
+        return []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        pages = list(ex.map(fetch_product_page, urls))
+    out = []
+    for u, page in zip(urls, pages):
+        if not page:
+            continue
+        item_id = u.rstrip("/").split("/")[-1]
+        og_title = _meta(page, "og:title")
+        now_price = None
+        m = re.search(r'class="FS2_itemPrice_area".*?class="itemPrice">\s*([\d,]+)\s*円', page, re.S)
+        if m:
+            now_price = int(m.group(1).replace(",", ""))
+        regular = ITEM_REGULAR_PRICES.get(item_id.lower())
+        if regular and now_price and now_price < regular:
+            price, sale = regular, now_price
+        else:
+            price, sale = now_price or regular, None
+        row = {"id": item_id, "link": u, "title": og_title, "description": _meta(page, "description", "name"),
+               "image_link": _meta(page, "og:image"), "availability": "in stock"}
+        meta_row = {"title": og_title, "price": f"{price} JPY" if price else "", "sale_price": f"{sale} JPY" if sale else ""}
+        e = build_search_entry(row, meta_row)
+        if e and e["v"]:                 # 在庫表が読めて、買える色・サイズがあるものだけ
+            out.append(e)
+    return out
+
 def write_search_index(processed_rows, meta_rows):
     import json
     items = [e for e in (build_search_entry(r, m) for r, m in zip(processed_rows, meta_rows)) if e]
+    try:
+        extra = supplement_search_entries([r.get("id", "") for r in processed_rows])
+        if extra:
+            print(f"サイト内検索：フィードに無い公開商品を補いました {len(extra)}商品 {[e['id'] for e in extra]}")
+        items += extra
+    except Exception as e:
+        print(f"::warning title=サイト内検索 補完::{e}")
     with_v = sum(1 for e in items if e["v"])
     if len(items) < SEARCH_MIN_ITEMS or with_v < len(items) * SEARCH_MIN_VARIANT_RATIO:
         if os.path.exists(search_index_file):
