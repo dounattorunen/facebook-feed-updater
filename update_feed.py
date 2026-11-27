@@ -974,6 +974,19 @@ def parse_member_price(page_html):
     m = MEMBER_PRICE_PATTERN.search(page_html or "")
     return int(m.group(1).replace(",", "")) if m else None
 
+REVIEW_COUNT_PATTERN = re.compile(r'class="FS2_ReviewButton_textLink">\s*\((\d+)件\)')
+REVIEW_AVG_PATTERN = re.compile(r'class="FS2_ReviewEditAverage".*?<b[^>]*>\s*([\d.]+)\s*</b>', re.S)
+
+def parse_review(page_html):
+    """商品ページのレビュー件数と平均評価。無ければ (0, None)"""
+    m = REVIEW_COUNT_PATTERN.search(page_html or "")
+    n = int(m.group(1)) if m else 0
+    a = REVIEW_AVG_PATTERN.search(page_html or "") if n else None
+    try:
+        return n, (round(float(a.group(1)), 2) if a else None)
+    except ValueError:
+        return n, None
+
 PAGE_TITLE_PATTERN = re.compile(r'<h1 class="itemTitle">(.*?)</h1>', re.S)
 
 def parse_page_title(page_html):
@@ -1083,6 +1096,8 @@ def build_search_entry(row, meta_row):
         "n": season_label(meta_title),            # 新作表記（季節つきならサムネにアイコン）
         "nc": "新色" in meta_title,               # 新色
         "mp": parse_member_price(page_html),      # 会員特別価格（ログインで適用。無ければ null）
+        "rc": parse_review(page_html)[0],         # レビュー件数
+        "ra": parse_review(page_html)[1],         # レビューの平均評価（件数0なら null）
     }
 
 # 出来上がったデータがこれより少なければ、何かの失敗（フィードの取得・商品ページの読み込み）とみなし、
