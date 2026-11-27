@@ -57,6 +57,22 @@ jobs:
             echo "::warning title=サイト内検索::search_index.json が作られていないためアップロードしませんでした"
           fi
 
+      # ③'' sitemap.xml（手作業管理）の商品URLを公開中の商品に合わせて直し、変更があればFTPで上書き
+      - name: Update sitemap.xml
+        run: |
+          rm -f sitemap_upload.xml
+          python update_sitemap.py || echo "::warning title=sitemap::update_sitemap.py が失敗しました（sitemap.xml は変更していません）"
+          if [ -s sitemap_upload.xml ]; then
+            curl -sS --fail --connect-timeout 30 --max-time 120 \
+              --retry 5 --retry-delay 20 --retry-all-errors \
+              -T sitemap_upload.xml "ftp://${{ secrets.FTP_SERVER }}/public_html/sitemap.xml" --user "${{ secrets.FTP_USERNAME }}:${{ secrets.FTP_PASSWORD }}" \
+              && echo "sitemap.xml をアップロードしました"
+            rm -f sitemap_upload.xml
+            git add sitemap_changes.txt sitemap_backup
+            git commit -m "sitemap.xml を更新: $(date +'%Y-%m-%d %H:%M')" || true
+            for i in 1 2 3; do git pull --rebase origin main && git push && break; sleep 10; done
+          fi
+
       # ④ XMLをfutureshopのFTPへ転送（★ pinterest_*.xml をすべて転送）
       - name: Upload XML via cURL
         run: |
